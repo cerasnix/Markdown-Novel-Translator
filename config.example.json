@@ -1,0 +1,20 @@
+{
+  "api_key": "YOUR_API_KEY_HERE",
+  "base_url": "https://api.openai.com/v1",
+  "model_name": "gpt-5-mini",
+  "target_language": "Simplified Chinese",
+  "chunk_size": 3,
+  "max_chunk_segments": 20,
+  "target_chunk_chars": 1000,
+  "max_segment_chars": 900,
+  "max_chunk_chars": 2600,
+  "retry_count": 2,
+  "request_timeout_seconds": 60,
+  "context_tail_segments": 3,
+  "summary_interval_batches": 8,
+  "summary_interval_chars": 8000,
+  "temperature": 0.3,
+  "reasoning": {
+    "effort": "low"
+  }
+}
