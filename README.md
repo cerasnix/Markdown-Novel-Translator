@@ -12,7 +12,7 @@
 1. 创建并激活环境（示例）：
 
 ```bash
-conda activate ocr
+conda activate <your_env_name>
 pip install openai
 ```
 
