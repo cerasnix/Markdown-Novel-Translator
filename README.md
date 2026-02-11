@@ -1,6 +1,6 @@
 # Markdown Novel Translator Starter
 
-这个目录是从现有脚本拆出的最小项目模板，包含：
+本项目包含：
 
 - `translate_markdown.py`：Markdown 小说分段翻译脚本
 - `prompt_markdown.txt`：默认通用 prompt（无角色定制引导）
