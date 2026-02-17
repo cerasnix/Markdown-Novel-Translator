@@ -1,4 +1,5 @@
 import argparse
+import html
 import json
 import re
 import time
@@ -20,13 +21,24 @@ BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?")
 REFERENCE_DEF_RE = re.compile(r"^\s*\[[^\]]+\]:\s+\S+")
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
 HTML_TAG_ONLY_RE = re.compile(r"^\s*</?[a-zA-Z][^>]*>\s*$")
+HTML_INLINE_TEXT_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<open><(?P<tag>[a-zA-Z][\w:-]*)(?:\s+[^>]*)?>)"
+    r"(?P<inner>.*?)(?P<close></(?P=tag)>\s*)$",
+    re.DOTALL,
+)
+HTML_LINE_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+HTML_TAG_RE = re.compile(r"<[^>]+>")
 SPLIT_POINT_RE = re.compile(r"(?:[。！？!?；;](?:[」』”’\"\)\]]*\s*))|(?:\n+)")
+HTML_TRANSLATABLE_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "figcaption"}
 
 
 @dataclass
 class Token:
     content: str
     translatable: bool
+    source_format: str = "markdown"
+    original_content: Optional[str] = None
+    html_indent: str = ""
 
 
 @dataclass
@@ -255,6 +267,37 @@ class MarkdownNovelTranslator:
         flush_paragraph()
         flush_fence()
         return tokens
+
+    def _extract_plain_text_from_html(self, html_fragment: str) -> str:
+        normalized = HTML_LINE_BREAK_RE.sub("\n", html_fragment)
+        normalized = HTML_TAG_RE.sub("", normalized)
+        return html.unescape(normalized).strip()
+
+    def _tokenize_html_line(self, line: str) -> Token:
+        line_without_newline = line.rstrip("\n")
+        match = HTML_INLINE_TEXT_RE.match(line_without_newline)
+        if not match:
+            return Token(content=line, translatable=False, source_format="html")
+
+        tag = match.group("tag").lower()
+        inner_html = match.group("inner")
+        plain_text = self._extract_plain_text_from_html(inner_html)
+        if tag not in HTML_TRANSLATABLE_TAGS or not plain_text:
+            return Token(content=line, translatable=False, source_format="html")
+
+        return Token(
+            content=plain_text,
+            translatable=True,
+            source_format="html",
+            original_content=line,
+            html_indent=match.group("indent"),
+        )
+
+    def tokenize_html(self, text: str) -> List[Token]:
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            return [Token(content="", translatable=False, source_format="html")]
+        return [self._tokenize_html_line(line) for line in lines]
 
     def _split_oversized_segment(self, text: str, max_chars: int) -> List[str]:
         if len(text) <= max_chars:
@@ -488,9 +531,8 @@ class MarkdownNovelTranslator:
                 output.append(token.content)
         return "".join(output)
 
-    def _format_bilingual_pair(
+    def _format_markdown_bilingual_pair(
         self,
-        token_index: int,
         original_text: str,
         translated_text: str,
     ) -> str:
@@ -507,11 +549,118 @@ class MarkdownNovelTranslator:
             f"{translated_quote}\n\n"
         )
 
+    def _format_html_translation_block(
+        self,
+        translated_text: str,
+        indent: str,
+        html_translation_style: str,
+    ) -> str:
+        plain_text = self._extract_plain_text_from_html(translated_text)
+        lines = [line.strip() for line in plain_text.splitlines() if line.strip()]
+        if not lines:
+            fallback = translated_text.strip()
+            lines = [fallback] if fallback else [""]
+
+        if html_translation_style == "paragraph":
+            return "".join(
+                f'{indent}<p class="cn-translation" lang="zh-CN" '
+                f'style="margin:0.2em 0 0.85em 1.2em;color:#555;">{html.escape(line, quote=False)}</p>\n'
+                for line in lines
+            )
+
+        if html_translation_style == "details":
+            detail_lines = [
+                (
+                    f'{indent}<details class="cn-translation" '
+                    'style="margin:0.3em 0 0.9em 1.2em;color:#555;">\n'
+                ),
+                (
+                    f'{indent}  <summary style="cursor:default;list-style:none;">'
+                    "译文</summary>\n"
+                ),
+            ]
+            detail_lines.extend(
+                f"{indent}  <p lang=\"zh-CN\">{html.escape(line, quote=False)}</p>\n"
+                for line in lines
+            )
+            detail_lines.append(f"{indent}</details>\n")
+            return "".join(detail_lines)
+
+        quote_lines = [
+            (
+                f'{indent}<blockquote class="cn-translation" lang="zh-CN" '
+                'style="margin:0.35em 0 0.85em 1.2em;padding-left:0.75em;'
+                'border-left:0.18em solid #9aa0a6;color:#555;">\n'
+            )
+        ]
+        quote_lines.extend(f"{indent}  <p>{html.escape(line, quote=False)}</p>\n" for line in lines)
+        quote_lines.append(f"{indent}</blockquote>\n")
+        return "".join(quote_lines)
+
+    def _format_html_bilingual_pair(
+        self,
+        original_text: str,
+        translated_text: str,
+        indent: str,
+        html_translation_style: str,
+    ) -> str:
+        original = original_text if original_text.endswith("\n") else (original_text + "\n")
+        return original + self._format_html_translation_block(
+            translated_text=translated_text,
+            indent=indent,
+            html_translation_style=html_translation_style,
+        )
+
+    def _format_html_translated_line(self, original_text: str, translated_text: str) -> str:
+        line_without_newline = original_text.rstrip("\n")
+        newline = "\n" if original_text.endswith("\n") else ""
+        match = HTML_INLINE_TEXT_RE.match(line_without_newline)
+        if not match:
+            translated = self._extract_plain_text_from_html(translated_text) or translated_text.strip()
+            return (translated + newline) if translated else newline
+
+        translated_plain = self._extract_plain_text_from_html(translated_text)
+        escaped = html.escape(translated_plain, quote=False)
+        return (
+            f"{match.group('indent')}{match.group('open')}"
+            f"{escaped}"
+            f"{match.group('close')}{newline}"
+        )
+
+    def _render_translatable_token(
+        self,
+        token: Token,
+        translated_text: str,
+        output_style: str,
+        html_translation_style: str,
+    ) -> str:
+        if token.source_format == "html":
+            original = token.original_content or token.content
+            if output_style == "bilingual":
+                return self._format_html_bilingual_pair(
+                    original_text=original,
+                    translated_text=translated_text,
+                    indent=token.html_indent,
+                    html_translation_style=html_translation_style,
+                )
+            return self._format_html_translated_line(original, translated_text)
+
+        if output_style == "bilingual":
+            return self._format_markdown_bilingual_pair(token.content, translated_text)
+        return translated_text
+
     def _format_nontranslatable_bilingual(self, content: str) -> str:
         # Keep meaningful non-translatable blocks (e.g. front matter/code fences) once.
         if content.strip() == "":
             return ""
         return content if content.endswith("\n") else (content + "\n")
+
+    def _render_nontranslatable_token(self, token: Token, output_style: str) -> str:
+        if output_style != "bilingual":
+            return token.content
+        if token.source_format == "html":
+            return token.content
+        return self._format_nontranslatable_bilingual(token.content)
 
     def _flush_ready_output(
         self,
@@ -520,6 +669,7 @@ class MarkdownNovelTranslator:
         next_token_index: int,
         output_path: Path,
         output_style: str,
+        html_translation_style: str,
     ) -> int:
         pieces: List[str] = []
         while next_token_index < len(tokens):
@@ -528,17 +678,18 @@ class MarkdownNovelTranslator:
                 translated = token_translation_map.get(next_token_index)
                 if translated is None:
                     break
-                if output_style == "bilingual":
-                    pieces.append(self._format_bilingual_pair(next_token_index, token.content, translated))
-                else:
-                    pieces.append(translated)
+                pieces.append(
+                    self._render_translatable_token(
+                        token=token,
+                        translated_text=translated,
+                        output_style=output_style,
+                        html_translation_style=html_translation_style,
+                    )
+                )
                 next_token_index += 1
                 continue
 
-            if output_style == "bilingual":
-                pieces.append(self._format_nontranslatable_bilingual(token.content))
-            else:
-                pieces.append(token.content)
+            pieces.append(self._render_nontranslatable_token(token, output_style))
             next_token_index += 1
 
         if pieces:
@@ -548,19 +699,24 @@ class MarkdownNovelTranslator:
 
     def process_file(
         self,
-        input_md: Path,
-        output_md: Path,
+        input_file: Path,
+        output_file: Path,
+        source_format: str,
         output_style: str = "bilingual",
+        html_translation_style: str = "blockquote",
         realtime_write: bool = True,
     ):
-        text = input_md.read_text(encoding="utf-8")
-        tokens = self.tokenize_markdown(text)
+        text = input_file.read_text(encoding="utf-8")
+        if source_format == "html":
+            tokens = self.tokenize_html(text)
+        else:
+            tokens = self.tokenize_markdown(text)
         prepared_segments = self.prepare_segments(tokens)
         total = len(prepared_segments)
 
         if total == 0:
-            output_md.write_text(text, encoding="utf-8")
-            self._print("Skip", f"{input_md.name}: no translatable segments found", "yellow")
+            output_file.write_text(text, encoding="utf-8")
+            self._print("Skip", f"{input_file.name}: no translatable segments found", "yellow")
             return True
 
         default_min_chunk_segments = max(1, int(self.config.get("chunk_size", 3)))
@@ -593,14 +749,16 @@ class MarkdownNovelTranslator:
 
         if realtime_write:
             if output_style == "bilingual":
-                output_md.write_text(
-                    f"# 双语对照预览：{input_md.stem}\n\n"
-                    "> 原文在上，译文在下；脚本会按分段实时写入。\n\n"
-                    ,
-                    encoding="utf-8",
-                )
+                if source_format == "html":
+                    output_file.write_text("", encoding="utf-8")
+                else:
+                    output_file.write_text(
+                        f"# 双语对照预览：{input_file.stem}\n\n"
+                        "> 原文在上，译文在下；脚本会按分段实时写入。\n\n",
+                        encoding="utf-8",
+                    )
             else:
-                output_md.write_text("", encoding="utf-8")
+                output_file.write_text("", encoding="utf-8")
 
         while i < total:
             end = self._next_batch_end(
@@ -645,14 +803,15 @@ class MarkdownNovelTranslator:
                         tokens=tokens,
                         token_translation_map=completed_token_map,
                         next_token_index=next_token_to_write,
-                        output_path=output_md,
+                        output_path=output_file,
                         output_style=output_style,
+                        html_translation_style=html_translation_style,
                     )
 
                 self._print(
                     "Chunk OK",
                     (
-                        f"{input_md.name}: segments {i + 1}-{end}/{total} | "
+                        f"{input_file.name}: segments {i + 1}-{end}/{total} | "
                         f"batch={end - i}, chars~{batch_chars}, "
                         f"summary={'Y' if need_summary_update else 'N'}"
                     ),
@@ -674,7 +833,7 @@ class MarkdownNovelTranslator:
             if current_min_chunk_segments == 1 and end == i + 1:
                 self._print(
                     "Abort",
-                    f"{input_md.name}: failed at segment {i + 1} after retries",
+                    f"{input_file.name}: failed at segment {i + 1} after retries",
                     "red",
                 )
                 return False
@@ -686,7 +845,7 @@ class MarkdownNovelTranslator:
             self._print(
                 "Downgrade",
                 (
-                    f"{input_md.name}: min_chunk {current_min_chunk_segments}->{new_min_chunk_segments}, "
+                    f"{input_file.name}: min_chunk {current_min_chunk_segments}->{new_min_chunk_segments}, "
                     f"max_chunk {current_max_chunk_segments}->{new_max_chunk_segments}, "
                     f"target_chars {current_target_chunk_chars}->{new_target_chunk_chars}, "
                     f"char_limit {current_char_limit}->{new_char_limit}"
@@ -703,16 +862,30 @@ class MarkdownNovelTranslator:
                 tokens=tokens,
                 token_translation_map=completed_token_map,
                 next_token_index=next_token_to_write,
-                output_path=output_md,
+                output_path=output_file,
                 output_style=output_style,
+                html_translation_style=html_translation_style,
             )
             if next_token_to_write != len(tokens):
                 raise RuntimeError("Realtime writer ended with unresolved tokens")
         else:
             token_translation_map = self.merge_translations(tokens, prepared_segments, translated_all)
-            rebuilt = self.reconstruct(tokens, token_translation_map)
-            output_md.write_text(rebuilt, encoding="utf-8")
-        self._print("Done", f"{input_md.name} -> {output_md.name}", "cyan")
+            if source_format == "html":
+                rebuilt = "".join(
+                    self._render_translatable_token(
+                        token=tokens[idx],
+                        translated_text=token_translation_map[idx],
+                        output_style=output_style,
+                        html_translation_style=html_translation_style,
+                    )
+                    if tokens[idx].translatable
+                    else self._render_nontranslatable_token(tokens[idx], output_style)
+                    for idx in range(len(tokens))
+                )
+            else:
+                rebuilt = self.reconstruct(tokens, token_translation_map)
+            output_file.write_text(rebuilt, encoding="utf-8")
+        self._print("Done", f"{input_file.name} -> {output_file.name}", "cyan")
         return True
 
     def run(
@@ -721,43 +894,66 @@ class MarkdownNovelTranslator:
         suffix: str = "_CN",
         skip_existing: bool = False,
         output_style: str = "bilingual",
+        html_translation_style: str = "blockquote",
         realtime_write: bool = True,
     ):
+        def detect_source_format(file_path: Path) -> Optional[str]:
+            ext = file_path.suffix.lower()
+            if ext in {".md", ".markdown"}:
+                return "markdown"
+            if ext in {".html", ".htm"}:
+                return "html"
+            return None
+
         path = Path(input_path)
         if path.is_file():
+            if detect_source_format(path) is None:
+                raise ValueError(f"Unsupported file type: {path.suffix}")
             files = [path]
         elif path.is_dir():
-            files = sorted(p for p in path.rglob("*.md") if p.is_file())
+            files = sorted(
+                p for p in path.rglob("*")
+                if p.is_file() and detect_source_format(p) is not None
+            )
         else:
             raise FileNotFoundError(f"Path not found: {input_path}")
 
         if not files:
-            print("No markdown files found.")
+            print("No markdown/html files found.")
             return
 
-        for md_path in files:
-            if md_path.stem.endswith(suffix):
+        for input_file in files:
+            source_format = detect_source_format(input_file)
+            if source_format is None:
                 continue
-            output_path = md_path.with_name(f"{md_path.stem}{suffix}{md_path.suffix}")
+            if input_file.stem.endswith(suffix):
+                continue
+            output_path = input_file.with_name(f"{input_file.stem}{suffix}{input_file.suffix}")
             if skip_existing and output_path.exists():
                 self._print("Skip", f"{output_path.name} already exists", "yellow")
                 continue
             try:
                 self.process_file(
-                    md_path,
+                    input_file,
                     output_path,
+                    source_format=source_format,
                     output_style=output_style,
+                    html_translation_style=html_translation_style,
                     realtime_write=realtime_write,
                 )
             except Exception as e:
-                self._print("Error", f"{md_path.name}: {e}", "red")
+                self._print("Error", f"{input_file.name}: {e}", "red")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Translate markdown novel files with context-aware chunking."
+        description="Translate markdown/html novel files with context-aware chunking."
     )
-    parser.add_argument("input_path", nargs="?", help="Path to .md file or folder containing .md files")
+    parser.add_argument(
+        "input_path",
+        nargs="?",
+        help="Path to .md/.markdown/.html file, or folder containing these files",
+    )
     parser.add_argument("--suffix", default="_CN", help="Output filename suffix (default: _CN)")
     parser.add_argument("--skip-existing", action="store_true", help="Skip files when output already exists")
     parser.add_argument("--config", default="config.json", help="Path to config JSON")
@@ -772,7 +968,13 @@ def parse_args():
         "--output-style",
         choices=["bilingual", "translated"],
         default="bilingual",
-        help="Output format: bilingual up/down blocks or translated-only markdown",
+        help="Output format: bilingual up/down blocks or translated-only output",
+    )
+    parser.add_argument(
+        "--html-translation-style",
+        choices=["blockquote", "paragraph", "details"],
+        default="blockquote",
+        help="HTML bilingual translation block style (default: blockquote)",
     )
     parser.add_argument(
         "--no-realtime-write",
@@ -786,7 +988,13 @@ if __name__ == "__main__":
     args = parse_args()
     input_path = args.input_path
     if not input_path:
-        input_path = input("Drag a markdown file/folder here: ").strip().replace("\\ ", " ").strip("'").strip('"')
+        input_path = (
+            input("Drag a markdown/html file/folder here: ")
+            .strip()
+            .replace("\\ ", " ")
+            .strip("'")
+            .strip('"')
+        )
 
     translator = MarkdownNovelTranslator(
         config_path=args.config,
@@ -798,5 +1006,6 @@ if __name__ == "__main__":
         suffix=args.suffix,
         skip_existing=args.skip_existing,
         output_style=args.output_style,
+        html_translation_style=args.html_translation_style,
         realtime_write=not args.no_realtime_write,
     )

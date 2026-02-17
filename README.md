@@ -1,8 +1,8 @@
-# Markdown Novel Translator Starter
+# Markdown / HTML Novel Translator Starter
 
 本项目包含：
 
-- `translate_markdown.py`：Markdown 小说分段翻译脚本
+- `translate_markdown.py`：Markdown / HTML 小说分段翻译脚本
 - `prompt_markdown.txt`：默认通用 prompt（无角色定制引导）
 - `prompt.example.json`：prompt JSON 示例（无角色定制引导）
 - `config.example.json`：配置模板（不含敏感信息）
@@ -27,7 +27,8 @@ cp config.example.json config.json
 4. 运行：
 
 ```bash
-python translate_markdown.py "/path/to/novel.md"
+python3 translate_markdown.py "/path/to/novel.md"
+python3 translate_markdown.py "/path/to/novel.html"
 ```
 
 ## 常用参数
@@ -38,7 +39,18 @@ python translate_markdown.py "/path/to/novel.md"
 - `--prompt`：指定 prompt 文件路径（默认 `prompt_markdown.txt`）
 - `--reasoning-effort`：覆盖 `low/medium/high`
 - `--output-style bilingual|translated`：双语或仅译文输出
+- `--html-translation-style blockquote|paragraph|details`：HTML 双语模式下译文块样式
 - `--no-realtime-write`：关闭实时写入
+
+## HTML 双语输出说明
+
+- 支持输入：`.html` / `.htm`（目录模式会同时扫描 `.md/.markdown/.html/.htm`）
+- 双语模式下保留原始 HTML 行，并在可翻译段落下方插入 `<blockquote>` 译文块
+- 译文块使用轻量内联样式（缩进 + 左边线），便于 Calibre 手动转换 EPUB 时保留对照层次
+- 可通过 `--html-translation-style` 切换样式：
+  - `blockquote`（推荐，EPUB 兼容性最好）
+  - `paragraph`（普通段落样式，最朴素）
+  - `details`（折叠块，部分阅读器可能不支持）
 
 ## 推荐默认参数（已在 example 配置中给出）
 
