@@ -2,9 +2,8 @@
 
 本项目包含：
 
-- `translate_markdown.py`：Markdown / HTML 小说分段翻译脚本
-- `prompt_markdown.txt`：默认通用 prompt（无角色定制引导）
-- `prompt.example.json`：prompt JSON 示例（无角色定制引导）
+- `translate.py`：Markdown / HTML 小说分段翻译脚本
+- `prompt.example.txt`：prompt 文本模板（无角色定制引导）
 - `config.example.json`：配置模板（不含敏感信息）
 
 ## Quick Start
@@ -24,15 +23,21 @@ cp config.example.json config.json
 
 3. 在 `config.json` 填入自己的 `api_key` / `base_url` / `model_name`。
 
-4. 运行：
+4. 初始化 prompt（首次一次即可）：
 
 ```bash
-python3 translate_markdown.py "/path/to/novel.md"
-python3 translate_markdown.py "/path/to/novel.html"
-python3 translate_markdown.py "/path/to/novel.epub"
-python3 translate_markdown.py "/path/to/novel.html" --htmlz-title "Book Title" --htmlz-author "Author Name"
-python3 translate_markdown.py "/path/to/novel.epub" --post-package both
-python3 translate_markdown.py
+cp prompt.example.txt prompt.txt
+```
+
+5. 运行：
+
+```bash
+python3 translate.py "/path/to/novel.md"
+python3 translate.py "/path/to/novel.html"
+python3 translate.py "/path/to/novel.epub"
+python3 translate.py "/path/to/novel.html" --htmlz-title "Book Title" --htmlz-author "Author Name"
+python3 translate.py "/path/to/novel.epub" --post-package both
+python3 translate.py
 ```
 
 ## 常用参数
@@ -40,7 +45,7 @@ python3 translate_markdown.py
 - `--suffix`：输出后缀（默认 `_CN`）
 - `--skip-existing`：跳过已存在输出
 - `--config`：指定配置文件路径
-- `--prompt`：指定 prompt 文件路径（默认 `prompt_markdown.txt`）
+- `--prompt`：指定 prompt 文件路径（默认 `prompt.txt`）
 - `--reasoning-effort`：覆盖 `low/medium/high`
 - `--output-style bilingual|translated`：双语或仅译文输出
 - `--html-translation-style blockquote|paragraph|details`：HTML 双语模式下译文块样式
@@ -55,8 +60,9 @@ python3 translate_markdown.py
 - `--skip-api-check`：跳过启动前 API 预检
 - `--api-check-only`：仅执行 API 预检并退出
 
-仅运行 `python3 translate_markdown.py`（不带参数）时会进入交互式模式，可选择工作模式并填写路径。
+仅运行 `python3 translate.py`（不带参数）时会进入交互式模式，可选择工作模式并填写路径。
 交互式路径输入支持 shell 转义形式（如 `\ `），并会在启动前校验路径是否存在。
+若 `prompt.txt` 不存在，程序会尝试从 `prompt.example.txt` 自动创建。
 
 ## HTML / EPUB -> HTMLZ 优化输出说明
 

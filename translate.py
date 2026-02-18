@@ -93,14 +93,15 @@ class MarkdownNovelTranslator:
     def __init__(
         self,
         config_path: str = "config.json",
-        prompt_path: str = "prompt_markdown.txt",
+        prompt_path: str = "prompt.txt",
         reasoning_effort: Optional[str] = None,
     ):
         if OpenAI is None:
             raise RuntimeError("Missing dependency: openai. Install with `pip install openai`.")
 
         self.config = self._load_json(config_path)
-        self.system_prompt = self._load_text(prompt_path)
+        resolved_prompt_path = self._resolve_prompt_path(prompt_path)
+        self.system_prompt = self._load_text(resolved_prompt_path)
         self.reasoning = self._resolve_reasoning(reasoning_effort)
         self.reasoning_supported = True
         self.last_failure_reason = ""
@@ -116,6 +117,23 @@ class MarkdownNovelTranslator:
     def _load_text(self, path: str) -> str:
         with open(path, "r", encoding="utf-8") as f:
             return f.read().strip()
+
+    def _resolve_prompt_path(self, prompt_path: str) -> str:
+        target_path = Path(prompt_path)
+        if target_path.exists():
+            return str(target_path)
+
+        if target_path.name == "prompt.txt":
+            example_path = target_path.with_name("prompt.example.txt")
+            if example_path.exists():
+                shutil.copyfile(example_path, target_path)
+                print(f"[Init] prompt.txt missing; created from {example_path.name}")
+                return str(target_path)
+
+        raise FileNotFoundError(
+            f"Prompt file not found: {prompt_path}. "
+            f"Create it or provide --prompt (for example: prompt.example.txt)."
+        )
 
     def _resume_state_path(self, output_file: Path) -> Path:
         return output_file.with_name(f"{output_file.name}.resume.json")
@@ -2097,7 +2115,7 @@ def parse_args():
     parser.add_argument("--suffix", default="_CN", help="Output filename suffix (default: _CN)")
     parser.add_argument("--skip-existing", action="store_true", help="Skip files when output already exists")
     parser.add_argument("--config", default="config.json", help="Path to config JSON")
-    parser.add_argument("--prompt", default="prompt_markdown.txt", help="Path to prompt text file")
+    parser.add_argument("--prompt", default="prompt.txt", help="Path to prompt text file")
     parser.add_argument(
         "--reasoning-effort",
         choices=["low", "medium", "high"],

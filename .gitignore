@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 config.json
+prompt.txt
 .DS_Store
