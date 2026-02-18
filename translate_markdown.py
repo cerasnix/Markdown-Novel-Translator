@@ -925,7 +925,7 @@ class MarkdownNovelTranslator:
             extra_body["reasoning"] = self.reasoning
 
         try:
-            request_timeout = float(self.config.get("request_timeout_seconds", 90))
+            request_timeout = float(self.config.get("request_timeout_seconds", 300))
             response = self.client.chat.completions.create(
                 model=self.config.get("model_name", "gemini-3-flash-preview"),
                 messages=[

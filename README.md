@@ -82,7 +82,7 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 - `max_segment_chars: 1200`
 - `max_chunk_chars: 5200`
 - `context_tail_segments: 5`
-- `request_timeout_seconds: 90`
+- `request_timeout_seconds: 300`
 - `summary_interval_batches: 10`
 - `summary_interval_chars: 16000`
 - `reasoning.effort: low`
