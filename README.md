@@ -56,6 +56,7 @@ python3 translate_markdown.py
 - `--api-check-only`：仅执行 API 预检并退出
 
 仅运行 `python3 translate_markdown.py`（不带参数）时会进入交互式模式，可选择工作模式并填写路径。
+交互式路径输入支持 shell 转义形式（如 `\ `），并会在启动前校验路径是否存在。
 
 ## HTML / EPUB -> HTMLZ 优化输出说明
 

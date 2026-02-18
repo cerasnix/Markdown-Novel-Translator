@@ -6,6 +6,7 @@ import json
 import mimetypes
 import posixpath
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -2174,6 +2175,22 @@ def _input_with_default(prompt: str, default: str) -> str:
     return raw if raw else default
 
 
+def _normalize_user_path_input(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if (text.startswith("'") and text.endswith("'")) or (text.startswith('"') and text.endswith('"')):
+        text = text[1:-1]
+    try:
+        parsed = shlex.split(text)
+        if len(parsed) == 1:
+            text = parsed[0]
+    except ValueError:
+        pass
+    text = text.replace("\\ ", " ")
+    return text.strip()
+
+
 def _input_yes_no(prompt: str, default_yes: bool = True) -> bool:
     hint = "Y/n" if default_yes else "y/N"
     raw = input(f"{prompt} ({hint}): ").strip().lower()
@@ -2217,7 +2234,14 @@ def _interactive_setup(args):
     args.post_package = mode_value
     args.input_path = ""
     while not args.input_path:
-        args.input_path = input("Input file/folder path: ").strip().strip("'").strip('"')
+        raw_path = input("Input file/folder path: ")
+        normalized_path = _normalize_user_path_input(raw_path)
+        if not normalized_path:
+            continue
+        if not Path(normalized_path).exists():
+            print(f"[Path not found] {normalized_path}")
+            continue
+        args.input_path = normalized_path
     args.suffix = _input_with_default("Output suffix", args.suffix)
 
     style_map = {"1": "bilingual", "2": "translated"}
@@ -2256,13 +2280,9 @@ if __name__ == "__main__":
 
     input_path = args.input_path
     if not input_path:
-        input_path = (
-            input("Drag a markdown/html/epub file/folder here: ")
-            .strip()
-            .replace("\\ ", " ")
-            .strip("'")
-            .strip('"')
-        )
+        input_path = _normalize_user_path_input(input("Drag a markdown/html/epub file/folder here: "))
+    else:
+        input_path = _normalize_user_path_input(input_path)
 
     translator.run(
         input_path=input_path,
