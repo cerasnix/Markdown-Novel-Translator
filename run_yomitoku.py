@@ -3,6 +3,8 @@ Reference helper for running YomiToku workflows.
 
 This script is for personal/reference use only and is not part of the
 recommended project workflow.
+It is currently tailored to the author's macOS usage.
+For setup details and full options, please refer to the official YomiToku repository/documentation.
 """
 
 import os
@@ -26,6 +28,7 @@ def main():
     print("========================================")
     print("    YomiToku 懒人调用工具 (v2.2)")
     print("    参考脚本：用于 YomiToku 工作流（仅供参考）")
+    print("    个人使用仅适配 macOS，详细用法请参考 YomiToku 官方仓库")
     print("========================================")
 
     # 1) Read and normalize input path
