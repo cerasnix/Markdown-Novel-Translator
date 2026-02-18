@@ -10,6 +10,7 @@
   "max_chunk_chars": 5200,
   "retry_count": 2,
   "request_timeout_seconds": 300,
+  "api_test_timeout_seconds": 90,
   "context_tail_segments": 5,
   "summary_interval_batches": 10,
   "summary_interval_chars": 16000,

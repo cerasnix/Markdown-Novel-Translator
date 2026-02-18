@@ -6,6 +6,7 @@ import json
 import mimetypes
 import posixpath
 import re
+import shutil
 import time
 import unicodedata
 import uuid
@@ -14,7 +15,8 @@ import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
 
 try:
     from openai import OpenAI
@@ -49,6 +51,25 @@ BARE_AMP_RE = re.compile(r"&(?!(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9._:-]*);
 SPLIT_POINT_RE = re.compile(r"(?:[。！？!?；;](?:[」』”’\"\)\]]*\s*))|(?:\n+)")
 HTML_TRANSLATABLE_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "figcaption"}
 BAD_FILENAME_CHARS_RE = re.compile(r"[\\/:*?\"<>|]+")
+HTML_ASSET_URL_ATTR_RE = re.compile(
+    r'(<(?P<tag>[a-zA-Z][\w:-]*)\b[^>]*?\b(?P<attr>src|href|poster|data)\s*=\s*)'
+    r'(?P<quote>["\'])(?P<url>[^"\']+)(?P=quote)',
+    re.IGNORECASE,
+)
+HTML_ASSET_SRCSET_RE = re.compile(
+    r'(<(?P<tag>img|source)\b[^>]*?\bsrcset\s*=\s*)(?P<quote>["\'])(?P<srcset>[^"\']+)(?P=quote)',
+    re.IGNORECASE,
+)
+HTML_ASSET_TAG_ATTRS = {
+    "img": {"src"},
+    "source": {"src"},
+    "video": {"src", "poster"},
+    "audio": {"src"},
+    "script": {"src"},
+    "link": {"href"},
+    "object": {"data"},
+    "embed": {"src"},
+}
 
 
 @dataclass
@@ -80,6 +101,7 @@ class MarkdownNovelTranslator:
         self.system_prompt = self._load_text(prompt_path)
         self.reasoning = self._resolve_reasoning(reasoning_effort)
         self.reasoning_supported = True
+        self.last_failure_reason = ""
         self.client = OpenAI(
             api_key=self.config["api_key"],
             base_url=self.config["base_url"],
@@ -139,6 +161,130 @@ class MarkdownNovelTranslator:
         cleaned = re.sub(r"[^\w.-]+", "_", cleaned, flags=re.UNICODE)
         cleaned = re.sub(r"_+", "_", cleaned).strip("._ ")
         return cleaned or "translated_novel"
+
+    def _sanitize_ascii_component(
+        self,
+        value: str,
+        fallback: str,
+        max_length: int = 56,
+    ) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+        ascii_value = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_value)
+        ascii_value = re.sub(r"_+", "_", ascii_value).strip("._-")
+        if not ascii_value:
+            ascii_value = fallback
+        ascii_value = ascii_value[:max_length].rstrip("._-")
+        return ascii_value or fallback
+
+    def _asset_subdir_by_extension(self, extension: str) -> str:
+        ext = extension.lower()
+        if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif", ".ico"}:
+            return "images"
+        if ext in {".css"}:
+            return "styles"
+        if ext in {".js", ".mjs"}:
+            return "scripts"
+        if ext in {".woff", ".woff2", ".ttf", ".otf"}:
+            return "fonts"
+        if ext in {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".mp4", ".webm"}:
+            return "media"
+        return "files"
+
+    def _is_local_asset_url(self, url: str) -> bool:
+        raw = (url or "").strip()
+        if not raw:
+            return False
+        lowered = raw.lower()
+        if lowered.startswith(
+            ("data:", "http:", "https:", "//", "mailto:", "javascript:", "tel:", "#")
+        ):
+            return False
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", raw):
+            return False
+        if raw.startswith("/"):
+            return False
+        return True
+
+    def _rewrite_html_assets_for_output(
+        self,
+        html_text: str,
+        source_base_dir: Path,
+        output_html_path: Path,
+    ) -> Tuple[str, int, int]:
+        output_dir = output_html_path.parent
+        book_slug = self._sanitize_ascii_component(output_html_path.stem, "book")
+        assets_root_rel = Path("assets") / book_slug
+        source_to_dest: Dict[str, Path] = {}
+        copied_files = 0
+        rewritten_refs = 0
+
+        def build_local_asset_url(raw_url: str) -> str:
+            nonlocal copied_files, rewritten_refs
+            if not self._is_local_asset_url(raw_url):
+                return raw_url
+
+            parsed = urlsplit(raw_url)
+            source_rel_path = unquote(parsed.path)
+            if not source_rel_path:
+                return raw_url
+
+            source_path = (source_base_dir / source_rel_path).resolve()
+            if not source_path.exists() or not source_path.is_file():
+                return raw_url
+
+            source_key = source_path.as_posix()
+            dest_rel = source_to_dest.get(source_key)
+            if dest_rel is None:
+                suffix_ascii = self._sanitize_ascii_component(source_path.suffix.lstrip("."), "", 12)
+                suffix = f".{suffix_ascii.lower()}" if suffix_ascii else ""
+                stem = self._sanitize_ascii_component(source_path.stem, "asset")
+                digest = hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:10]
+                subdir = self._asset_subdir_by_extension(suffix)
+                filename = f"{stem}_{digest}{suffix}"
+                dest_rel = assets_root_rel / subdir / filename
+                dest_path = output_dir / dest_rel
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                if source_path != dest_path:
+                    shutil.copy2(source_path, dest_path)
+                source_to_dest[source_key] = dest_rel
+                copied_files += 1
+
+            new_url = dest_rel.as_posix()
+            if parsed.query:
+                new_url = f"{new_url}?{parsed.query}"
+            if parsed.fragment:
+                new_url = f"{new_url}#{parsed.fragment}"
+            if new_url != raw_url:
+                rewritten_refs += 1
+            return new_url
+
+        def replace_attr(match: re.Match) -> str:
+            tag_name = (match.group("tag") or "").lower()
+            attr_name = (match.group("attr") or "").lower()
+            allowed_attrs = HTML_ASSET_TAG_ATTRS.get(tag_name)
+            if not allowed_attrs or attr_name not in allowed_attrs:
+                return match.group(0)
+            rewritten = build_local_asset_url(match.group("url"))
+            return f"{match.group(1)}{match.group('quote')}{rewritten}{match.group('quote')}"
+
+        def replace_srcset(match: re.Match) -> str:
+            srcset_value = match.group("srcset")
+            entries = [item.strip() for item in srcset_value.split(",")]
+            rewritten_entries: List[str] = []
+            for entry in entries:
+                if not entry:
+                    continue
+                parts = entry.split()
+                first_url = parts[0]
+                parts[0] = build_local_asset_url(first_url)
+                rewritten_entries.append(" ".join(parts))
+            rewritten_srcset = ", ".join(rewritten_entries)
+            return f"{match.group(1)}{match.group('quote')}{rewritten_srcset}{match.group('quote')}"
+
+        rewritten_html = HTML_ASSET_URL_ATTR_RE.sub(replace_attr, html_text)
+        rewritten_html = HTML_ASSET_SRCSET_RE.sub(replace_srcset, rewritten_html)
+        return rewritten_html, copied_files, rewritten_refs
 
     def _build_htmlz_document_header(
         self,
@@ -596,6 +742,146 @@ class MarkdownNovelTranslator:
             return "low"
         return value
 
+    def _mask_secret(self, value: str) -> str:
+        if not value:
+            return "(empty)"
+        if len(value) <= 10:
+            return f"{value[:2]}***{value[-2:]}"
+        return f"{value[:6]}...{value[-4:]}"
+
+    def run_api_preflight_check(self) -> bool:
+        model_name = self.config.get("model_name", "gpt-5-mini")
+        base_url = str(self.config.get("base_url", "")).strip()
+        target_language = self.config.get("target_language", "Simplified Chinese")
+        request_timeout = float(self.config.get("request_timeout_seconds", 300))
+        check_timeout = float(self.config.get("api_test_timeout_seconds", min(request_timeout, 90)))
+        check_timeout = max(10.0, check_timeout)
+        api_key = str(self.config.get("api_key", ""))
+
+        self._print(
+            "API Check",
+            (
+                f"model={model_name}\n"
+                f"base_url={base_url}\n"
+                f"api_key={self._mask_secret(api_key)}\n"
+                f"target_language={target_language}\n"
+                f"request_timeout_seconds={request_timeout}\n"
+                f"api_test_timeout_seconds={check_timeout}\n"
+                f"reasoning={self.reasoning if self.reasoning_supported else 'disabled'}"
+            ),
+            "cyan",
+        )
+
+        test_segments = ["API connectivity test paragraph."]
+        user_payload = {
+            "target_language": target_language,
+            "previous_context": "",
+            "previous_context_summary": "",
+            "recent_translated_tail": [],
+            "input_pages": [[test_segments[0]]],
+            "input_segments": test_segments,
+            "must_keep_segment_count": 1,
+            "novel_mode": True,
+            "need_summary_update": False,
+        }
+
+        extra_body = {}
+        cfg_extra_body = self.config.get("extra_body")
+        if isinstance(cfg_extra_body, dict):
+            extra_body.update(cfg_extra_body)
+
+        attempts = 0
+        while attempts < 2:
+            attempts += 1
+            local_extra_body = dict(extra_body)
+            if self.reasoning_supported:
+                local_extra_body["reasoning"] = self.reasoning
+
+            check_started = time.time()
+            try:
+                response = self.client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=float(self.config.get("temperature", 0.3)),
+                    extra_body=local_extra_body,
+                    timeout=check_timeout,
+                )
+                elapsed = time.time() - check_started
+
+                if not response.choices:
+                    self._print("API Check Fail", f"no choices returned in {elapsed:.2f}s", "red")
+                    return False
+
+                choice = response.choices[0]
+                content = choice.message.content or ""
+                if not content:
+                    self._print("API Check Fail", f"empty content in {elapsed:.2f}s", "red")
+                    return False
+
+                data = json.loads(content)
+                translated, parse_reason = self._extract_translated_segments(data, expected_count=1)
+                if translated is None:
+                    self._print(
+                        "API Check Fail",
+                        (
+                            f"parse_error={parse_reason}\n"
+                            f"response_keys={list(data.keys())[:12]}\n"
+                            f"elapsed={elapsed:.2f}s"
+                        ),
+                        "red",
+                    )
+                    return False
+
+                usage = getattr(response, "usage", None)
+                prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+                completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+                total_tokens = getattr(usage, "total_tokens", None) if usage else None
+                finish_reason = getattr(choice, "finish_reason", None)
+
+                self._print(
+                    "API Check OK",
+                    (
+                        f"elapsed={elapsed:.2f}s\n"
+                        f"response_model={getattr(response, 'model', '(unknown)')}\n"
+                        f"finish_reason={finish_reason}\n"
+                        f"usage.prompt_tokens={prompt_tokens}\n"
+                        f"usage.completion_tokens={completion_tokens}\n"
+                        f"usage.total_tokens={total_tokens}\n"
+                        f"response_keys={list(data.keys())[:12]}\n"
+                        f"segments_count={len(translated)}\n"
+                        f"new_summary_len={len(str(data.get('new_summary', '')))}"
+                    ),
+                    "green",
+                )
+                return True
+            except Exception as e:
+                message = str(e)
+                if self.reasoning_supported and "Unknown parameter: 'reasoning'" in message:
+                    self.reasoning_supported = False
+                    self._print(
+                        "API Check Compat",
+                        "reasoning parameter unsupported; retrying check without reasoning",
+                        "yellow",
+                    )
+                    continue
+                self._print(
+                    "API Check Fail",
+                    (
+                        f"exception_type={type(e).__name__}\n"
+                        f"exception={message}\n"
+                        f"attempt={attempts}/2"
+                    ),
+                    "red",
+                )
+                return False
+
+        self._print("API Check Fail", "reasoning compatibility retry exhausted", "red")
+        return False
+
     def _print_progress(self, done: int, total: int, started_at: float) -> None:
         if total <= 0:
             return
@@ -880,16 +1166,28 @@ class MarkdownNovelTranslator:
             return None
         return normalized
 
-    def _extract_translated_segments(self, data: dict, expected_count: int) -> Optional[List[str]]:
+    def _extract_translated_segments(
+        self,
+        data: dict,
+        expected_count: int,
+    ) -> Tuple[Optional[List[str]], str]:
         segments = data.get("segments")
-        if isinstance(segments, list) and len(segments) == expected_count:
-            return [str(x) for x in segments]
+        if isinstance(segments, list):
+            if len(segments) == expected_count:
+                return [str(x) for x in segments], ""
+            return None, f"segments_count_mismatch expected={expected_count} actual={len(segments)}"
+        if segments is not None:
+            return None, f"segments_type_invalid type={type(segments).__name__}"
 
         pages = data.get("pages")
         normalized = self._normalize_pages_to_segments(pages, expected_count)
         if normalized is not None:
-            return normalized
-        return None
+            return normalized, ""
+        if isinstance(pages, list):
+            return None, f"pages_shape_mismatch expected={expected_count} actual={len(pages)}"
+        if pages is not None:
+            return None, f"pages_type_invalid type={type(pages).__name__}"
+        return None, f"missing_segments_pages expected={expected_count}"
 
     def call_api(
         self,
@@ -899,6 +1197,7 @@ class MarkdownNovelTranslator:
         need_summary_update: bool,
     ):
         target_language = self.config.get("target_language", "Simplified Chinese")
+        self.last_failure_reason = ""
         # Keep compatibility with both markdown-novel prompts (segments) and
         # legacy mokuro prompts (pages + previous_context).
         input_pages = [[seg] for seg in segment_texts]
@@ -939,18 +1238,21 @@ class MarkdownNovelTranslator:
             )
 
             if not response.choices:
+                self.last_failure_reason = "empty_response"
                 return None, ""
 
             content = response.choices[0].message.content
             if not content:
+                self.last_failure_reason = "empty_response"
                 return None, last_summary
 
             data = json.loads(content)
-            translated = self._extract_translated_segments(data, len(segment_texts))
+            translated, parse_reason = self._extract_translated_segments(data, len(segment_texts))
             if translated is None:
+                self.last_failure_reason = "parse_fail"
                 self._print(
                     "ParseFail",
-                    f"unexpected response keys={list(data.keys())[:8]}",
+                    f"{parse_reason} | keys={list(data.keys())[:8]}",
                     "yellow",
                 )
                 return None, ""
@@ -971,6 +1273,7 @@ class MarkdownNovelTranslator:
                     recent_tail=recent_tail,
                     need_summary_update=need_summary_update,
                 )
+            self.last_failure_reason = "api_error"
             self._print("APIErr", str(e), "yellow")
             return None, ""
 
@@ -989,14 +1292,33 @@ class MarkdownNovelTranslator:
                     f"chunk-size={len(segment_texts)} attempt={attempt}/{retries}",
                     "yellow",
                 )
+            attempt_started = time.time()
             translated, new_summary = self.call_api(
                 segment_texts,
                 last_summary,
                 recent_tail,
                 need_summary_update,
             )
+            attempt_elapsed = time.time() - attempt_started
             if translated is not None:
+                self._print(
+                    "Chunk API",
+                    (
+                        f"chunk-size={len(segment_texts)} attempt={attempt}/{retries} "
+                        f"ok in {attempt_elapsed:.1f}s"
+                    ),
+                    "cyan",
+                )
                 return translated, new_summary
+            self._print(
+                "Chunk API",
+                (
+                    f"chunk-size={len(segment_texts)} attempt={attempt}/{retries} "
+                    f"failed in {attempt_elapsed:.1f}s "
+                    f"(reason={self.last_failure_reason or 'unknown'})"
+                ),
+                "yellow",
+            )
             if attempt < retries:
                 time.sleep(1.2 * attempt)
         return None, ""
@@ -1216,6 +1538,7 @@ class MarkdownNovelTranslator:
         resume: bool = True,
         realtime_write: bool = True,
     ):
+        prep_started_at = time.time()
         epub_meta: Dict[str, Optional[str]] = {}
         if source_format == "epub":
             epub_payload = self._extract_epub_html_payload(input_file)
@@ -1238,6 +1561,17 @@ class MarkdownNovelTranslator:
                 tokens = self.tokenize_markdown(text)
         prepared_segments = self.prepare_segments(tokens)
         total = len(prepared_segments)
+        translatable_tokens = sum(1 for token in tokens if token.translatable)
+        prep_elapsed = time.time() - prep_started_at
+        self._print(
+            "Prepare",
+            (
+                f"{input_file.name}: format={source_format}, tokens={len(tokens)}, "
+                f"translatable_tokens={translatable_tokens}, segments={total}, "
+                f"elapsed={prep_elapsed:.1f}s"
+            ),
+            "cyan",
+        )
         use_htmlz_wrapper = source_format in {"html", "epub"}
         resolved_html_title = (
             (htmlz_title or epub_meta.get("title") or input_file.stem).strip() or input_file.stem
@@ -1276,6 +1610,7 @@ class MarkdownNovelTranslator:
         )
         default_target_chunk_chars = max(200, int(self.config.get("target_chunk_chars", 2600)))
         default_char_limit = max(1200, int(self.config.get("max_chunk_chars", 5200)))
+        request_timeout = float(self.config.get("request_timeout_seconds", 300))
         context_tail_segments = max(0, int(self.config.get("context_tail_segments", 5)))
         summary_interval_batches = max(1, int(self.config.get("summary_interval_batches", 10)))
         summary_interval_chars = max(0, int(self.config.get("summary_interval_chars", 16000)))
@@ -1440,6 +1775,14 @@ class MarkdownNovelTranslator:
             }
             self._save_resume_state(resume_path, state)
 
+        def shrink_value(current: int, min_value: int, ratio: float) -> int:
+            safe_ratio = max(0.1, min(0.95, ratio))
+            candidate = max(min_value, int(current * safe_ratio))
+            if candidate >= current and current > min_value:
+                candidate = current - 1
+            return max(min_value, candidate)
+
+        self._print_progress(done_segments, total, started_at)
         while i < total:
             end = self._next_batch_end(
                 start_idx=i,
@@ -1456,6 +1799,18 @@ class MarkdownNovelTranslator:
                 i == 0
                 or batches_since_summary >= summary_interval_batches
                 or (summary_interval_chars > 0 and chars_since_summary >= summary_interval_chars)
+            )
+            elapsed = time.time() - started_at
+            self._print(
+                "Chunk Start",
+                (
+                    f"{input_file.name}: segments {i + 1}-{end}/{total} | "
+                    f"batch={end - i}, chars~{batch_chars}, summary={'Y' if need_summary_update else 'N'}, "
+                    f"chunk[min/max]={current_min_chunk_segments}/{current_max_chunk_segments}, "
+                    f"target={current_target_chunk_chars}, limit={current_char_limit}, "
+                    f"timeout={request_timeout:.0f}s, elapsed={elapsed:.1f}s"
+                ),
+                "cyan",
             )
 
             translated, new_summary = self.translate_chunk_with_retry(
@@ -1520,14 +1875,33 @@ class MarkdownNovelTranslator:
                 )
                 return False
 
-            new_min_chunk_segments = max(1, current_min_chunk_segments // 2)
-            new_max_chunk_segments = max(new_min_chunk_segments, current_max_chunk_segments // 2)
-            new_target_chunk_chars = max(200, current_target_chunk_chars // 2)
-            new_char_limit = max(1200, current_char_limit // 2)
+            failure_reason = self.last_failure_reason or "unknown"
+            shrink_ratio = 0.8 if failure_reason == "parse_fail" else 0.5
+            new_min_chunk_segments = shrink_value(
+                current=current_min_chunk_segments,
+                min_value=1,
+                ratio=shrink_ratio,
+            )
+            new_max_chunk_segments = shrink_value(
+                current=current_max_chunk_segments,
+                min_value=new_min_chunk_segments,
+                ratio=shrink_ratio,
+            )
+            new_target_chunk_chars = shrink_value(
+                current=current_target_chunk_chars,
+                min_value=200,
+                ratio=shrink_ratio,
+            )
+            new_char_limit = shrink_value(
+                current=current_char_limit,
+                min_value=1200,
+                ratio=shrink_ratio,
+            )
             self._print(
                 "Downgrade",
                 (
-                    f"{input_file.name}: min_chunk {current_min_chunk_segments}->{new_min_chunk_segments}, "
+                    f"{input_file.name}: reason={failure_reason}, ratio={shrink_ratio:.2f}, "
+                    f"min_chunk {current_min_chunk_segments}->{new_min_chunk_segments}, "
                     f"max_chunk {current_max_chunk_segments}->{new_max_chunk_segments}, "
                     f"target_chars {current_target_chunk_chars}->{new_target_chunk_chars}, "
                     f"char_limit {current_char_limit}->{new_char_limit}"
@@ -1585,6 +1959,29 @@ class MarkdownNovelTranslator:
                 rebuilt = self.reconstruct(tokens, token_translation_map)
             output_file.write_text(rebuilt, encoding="utf-8")
             output_bytes_written = output_file.stat().st_size if output_file.exists() else 0
+
+        if source_format == "html":
+            try:
+                rendered_html = output_file.read_text(encoding="utf-8")
+                rewritten_html, copied_files, rewritten_refs = self._rewrite_html_assets_for_output(
+                    html_text=rendered_html,
+                    source_base_dir=input_file.parent,
+                    output_html_path=output_file,
+                )
+                if rewritten_html != rendered_html:
+                    output_file.write_text(rewritten_html, encoding="utf-8")
+                    output_bytes_written = output_file.stat().st_size if output_file.exists() else 0
+                if copied_files > 0 or rewritten_refs > 0:
+                    self._print(
+                        "Assets",
+                        (
+                            f"{output_file.name}: copied={copied_files}, "
+                            f"rewritten={rewritten_refs}, root=assets/"
+                        ),
+                        "cyan",
+                    )
+            except Exception as e:
+                self._print("Assets Warn", f"{output_file.name}: {e}", "yellow")
         if resume_path.exists():
             resume_path.unlink()
         self._print("Done", f"{input_file.name} -> {output_file.name}", "cyan")
@@ -1758,11 +2155,33 @@ def parse_args():
         action="store_true",
         help="Disable checkpoint resume and always restart from beginning",
     )
+    parser.add_argument(
+        "--skip-api-check",
+        action="store_true",
+        help="Skip startup API preflight check",
+    )
+    parser.add_argument(
+        "--api-check-only",
+        action="store_true",
+        help="Run API preflight check only and exit",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    translator = MarkdownNovelTranslator(
+        config_path=args.config,
+        prompt_path=args.prompt,
+        reasoning_effort=args.reasoning_effort,
+    )
+    if not args.skip_api_check:
+        passed = translator.run_api_preflight_check()
+        if not passed:
+            raise SystemExit(2)
+    if args.api_check_only:
+        raise SystemExit(0)
+
     input_path = args.input_path
     if not input_path:
         input_path = (
@@ -1773,11 +2192,6 @@ if __name__ == "__main__":
             .strip('"')
         )
 
-    translator = MarkdownNovelTranslator(
-        config_path=args.config,
-        prompt_path=args.prompt,
-        reasoning_effort=args.reasoning_effort,
-    )
     translator.run(
         input_path=input_path,
         suffix=args.suffix,

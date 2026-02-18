@@ -51,6 +51,8 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 - `--htmlz-publisher`：设置出版社元数据
 - `--no-resume`：关闭断点续跑（默认开启）
 - `--no-realtime-write`：关闭实时写入
+- `--skip-api-check`：跳过启动前 API 预检
+- `--api-check-only`：仅执行 API 预检并退出
 
 ## HTML / EPUB -> HTMLZ 优化输出说明
 
@@ -58,6 +60,8 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 - HTML 输入默认输出为“HTMLZ 友好”HTML（不自动打包，便于先校对再手动打包）
 - EPUB 输入会先抽取 spine 顺序的章节 HTML，再按同样规则输出为 `.html`
 - 输出文件名会自动清洗为归档友好格式（例如去除书名号、空白归一）
+- 普通 HTML 输出会自动复制本地引用资源到输出目录下 `assets/<book_ascii_slug>/`
+- 复制后的资源名与引用路径会转为 ASCII 安全格式（含哈希后缀），降低 HTMLZ/EPUB 转换时的路径编码兼容问题
 - 输出文件会注入 `<title>` 与 `dc.*` 元数据标签，便于后续 Calibre 识别
 - 双语模式下保留原始 HTML 行，并在可翻译段落下方插入译文块（默认 `blockquote`）
 - 可选 `--post-package` 在 HTML 生成后继续输出 `.htmlz` 或 `.epub`（EPUB3）文件
@@ -69,6 +73,7 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 
 ## 稳定性说明
 
+- 默认会在正式翻译前执行一次 API 预检（连通性、模型返回结构、基础解析），预检通过后才进入翻译
 - 断点文件：默认在输出文件旁写入 `*.resume.json`，任务成功完成后自动删除
 - 续跑条件：输入内容与输出模式匹配时会自动恢复；不匹配会自动忽略旧断点并重新开始
 - API 兼容：若服务端不支持 `reasoning` 参数，脚本会自动回退并继续翻译
@@ -83,6 +88,7 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 - `max_chunk_chars: 5200`
 - `context_tail_segments: 5`
 - `request_timeout_seconds: 300`
+- `api_test_timeout_seconds: 90`
 - `summary_interval_batches: 10`
 - `summary_interval_chars: 16000`
 - `reasoning.effort: low`
