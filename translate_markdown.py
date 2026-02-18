@@ -825,7 +825,7 @@ class MarkdownNovelTranslator:
         return parts
 
     def prepare_segments(self, tokens: List[Token]) -> List[PreparedSegment]:
-        max_segment_chars = max(300, int(self.config.get("max_segment_chars", 900)))
+        max_segment_chars = max(300, int(self.config.get("max_segment_chars", 1200)))
         prepared: List[PreparedSegment] = []
 
         for token_index, token in enumerate(tokens):
@@ -925,7 +925,7 @@ class MarkdownNovelTranslator:
             extra_body["reasoning"] = self.reasoning
 
         try:
-            request_timeout = float(self.config.get("request_timeout_seconds", 60))
+            request_timeout = float(self.config.get("request_timeout_seconds", 90))
             response = self.client.chat.completions.create(
                 model=self.config.get("model_name", "gemini-3-flash-preview"),
                 messages=[
@@ -1269,16 +1269,16 @@ class MarkdownNovelTranslator:
             self._print("Skip", f"{input_file.name}: no translatable segments found", "yellow")
             return True
 
-        default_min_chunk_segments = max(1, int(self.config.get("chunk_size", 3)))
+        default_min_chunk_segments = max(1, int(self.config.get("chunk_size", 4)))
         default_max_chunk_segments = max(
             default_min_chunk_segments,
-            int(self.config.get("max_chunk_segments", 20)),
+            int(self.config.get("max_chunk_segments", 80)),
         )
-        default_target_chunk_chars = max(200, int(self.config.get("target_chunk_chars", 1000)))
-        default_char_limit = max(1200, int(self.config.get("max_chunk_chars", 2600)))
-        context_tail_segments = max(0, int(self.config.get("context_tail_segments", 3)))
-        summary_interval_batches = max(1, int(self.config.get("summary_interval_batches", 8)))
-        summary_interval_chars = max(0, int(self.config.get("summary_interval_chars", 8000)))
+        default_target_chunk_chars = max(200, int(self.config.get("target_chunk_chars", 2600)))
+        default_char_limit = max(1200, int(self.config.get("max_chunk_chars", 5200)))
+        context_tail_segments = max(0, int(self.config.get("context_tail_segments", 5)))
+        summary_interval_batches = max(1, int(self.config.get("summary_interval_batches", 10)))
+        summary_interval_chars = max(0, int(self.config.get("summary_interval_chars", 16000)))
         resume_path = self._resume_state_path(output_file)
         resume_fingerprint = self._resume_fingerprint(
             source_text=text,
@@ -1319,22 +1319,6 @@ class MarkdownNovelTranslator:
                     summary = str(previous_state.get("summary", summary))
                     batches_since_summary = max(0, int(previous_state.get("batches_since_summary", 0)))
                     chars_since_summary = max(0, int(previous_state.get("chars_since_summary", 0)))
-                    current_min_chunk_segments = max(
-                        1,
-                        int(previous_state.get("current_min_chunk_segments", default_min_chunk_segments)),
-                    )
-                    current_max_chunk_segments = max(
-                        current_min_chunk_segments,
-                        int(previous_state.get("current_max_chunk_segments", default_max_chunk_segments)),
-                    )
-                    current_target_chunk_chars = max(
-                        200,
-                        int(previous_state.get("current_target_chunk_chars", default_target_chunk_chars)),
-                    )
-                    current_char_limit = max(
-                        1200,
-                        int(previous_state.get("current_char_limit", default_char_limit)),
-                    )
                     translated_tail = previous_state.get("translated_tail")
                     if isinstance(translated_tail, list):
                         translated_all = [str(x) for x in translated_tail]
@@ -1361,7 +1345,8 @@ class MarkdownNovelTranslator:
                             "Resume",
                             (
                                 f"{input_file.name}: restored segment={i}/{total}, "
-                                f"written_token={next_token_to_write}"
+                                f"written_token={next_token_to_write}, "
+                                "chunk_policy=current_config"
                             ),
                             "yellow",
                         )
@@ -1447,10 +1432,6 @@ class MarkdownNovelTranslator:
                 "summary": summary,
                 "batches_since_summary": batches_since_summary,
                 "chars_since_summary": chars_since_summary,
-                "current_min_chunk_segments": current_min_chunk_segments,
-                "current_max_chunk_segments": current_max_chunk_segments,
-                "current_target_chunk_chars": current_target_chunk_chars,
-                "current_char_limit": current_char_limit,
                 "translated_tail": tail,
                 "token_part_translated": {str(k): v for k, v in token_part_translated.items()},
                 "completed_token_map": {str(k): v for k, v in completed_token_map.items()},

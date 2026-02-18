@@ -72,14 +72,17 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 - 断点文件：默认在输出文件旁写入 `*.resume.json`，任务成功完成后自动删除
 - 续跑条件：输入内容与输出模式匹配时会自动恢复；不匹配会自动忽略旧断点并重新开始
 - API 兼容：若服务端不支持 `reasoning` 参数，脚本会自动回退并继续翻译
+- 参数变更兼容：续跑只恢复进度与上下文，分块策略始终使用当前配置
 
 ## 推荐默认参数（已在 example 配置中给出）
 
-- `chunk_size: 3`
-- `max_chunk_segments: 20`
-- `target_chunk_chars: 1000`
-- `max_segment_chars: 900`
-- `max_chunk_chars: 2600`
-- `summary_interval_batches: 8`
-- `summary_interval_chars: 8000`
+- `chunk_size: 4`
+- `max_chunk_segments: 80`
+- `target_chunk_chars: 2600`
+- `max_segment_chars: 1200`
+- `max_chunk_chars: 5200`
+- `context_tail_segments: 5`
+- `request_timeout_seconds: 90`
+- `summary_interval_batches: 10`
+- `summary_interval_chars: 16000`
 - `reasoning.effort: low`
