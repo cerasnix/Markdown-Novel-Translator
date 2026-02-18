@@ -1,95 +1,111 @@
-# Markdown / HTML Novel Translator Starter
+# Markdown / HTML / EPUB Novel Translator
 
-本项目包含：
+## 项目文件
 
-- `translate.py`：Markdown / HTML 小说分段翻译脚本
-- `prompt.example.txt`：prompt 文本模板（无角色定制引导）
-- `config.example.json`：配置模板（不含敏感信息）
+- `translate.py`：主脚本（翻译、断点续跑、可选打包）
+- `prompt.example.txt`：Prompt 模板（复制为 `prompt.txt` 后可自定义）
+- `config.example.json`：配置模板（复制为 `config.json`）
 
-## Quick Start
+## 快速开始
 
-1. 创建并激活环境（示例）：
+1) 安装依赖
 
 ```bash
-conda activate <your_env_name>
 pip install openai
 ```
 
-2. 复制配置模板：
+2) 初始化配置与 Prompt
 
 ```bash
 cp config.example.json config.json
-```
-
-3. 在 `config.json` 填入自己的 `api_key` / `base_url` / `model_name`。
-
-4. 初始化 prompt（首次一次即可）：
-
-```bash
 cp prompt.example.txt prompt.txt
 ```
 
-5. 运行：
+3) 在 `config.json` 填入你的 `api_key` / `base_url` / `model_name`
+
+4) 运行
 
 ```bash
-python3 translate.py "/path/to/novel.md"
-python3 translate.py "/path/to/novel.html"
-python3 translate.py "/path/to/novel.epub"
-python3 translate.py "/path/to/novel.html" --htmlz-title "Book Title" --htmlz-author "Author Name"
-python3 translate.py "/path/to/novel.epub" --post-package both
+python3 translate.py "/path/to/book.md"
+python3 translate.py "/path/to/book.html"
+python3 translate.py "/path/to/book.epub"
+python3 translate.py "/path/to/book.epub" --post-package both
 python3 translate.py
 ```
 
+说明：`python3 translate.py`（无参数）会进入交互式模式，支持工作模式选择与路径校验。
+
+## 输入与输出行为
+
+### 输入类型
+
+- 单文件：`.md` / `.markdown` / `.html` / `.htm` / `.epub`
+- 目录：递归扫描上述文件类型
+
+### 默认输出类型
+
+- Markdown 输入 -> 输出 Markdown（同后缀）
+- HTML 输入 -> 输出 HTML（HTMLZ 友好）
+- EPUB 输入 -> 输出 HTML（统一进入 HTML 工作流，便于校对）
+
+### 可选后处理打包
+
+- `--post-package htmlz`：在 HTML 输出后生成 `.htmlz`
+- `--post-package epubv3`：在 HTML 输出后生成 `.epub`
+- `--post-package both`：同时生成 `.htmlz` 和 `.epub`
+
+## EPUB 输入处理流程（新增能力说明）
+
+当输入为 `.epub` 时，脚本会执行：
+
+1. 读取 `META-INF/container.xml`，定位 OPF  
+2. 解析 OPF 的 `manifest + spine`，按 spine 顺序抽取章节  
+3. 提取章节 HTML/XHTML 的 `<body>` 内容并拼接为统一 HTML  
+4. 内联 EPUB 内部图片（`img src` 转 `data:`）避免资源丢失  
+5. 将拼接后的 HTML 按与 HTML 输入相同的分段翻译逻辑处理  
+6. 输出为 `.html`，可继续 `--post-package` 生成 `.htmlz/.epub`
+
+这意味着 EPUB 与 HTML 的下游校对、样式和打包流程完全一致。
+
+## HTML 资源与 HTMLZ 兼容优化
+
+- 输出文件名自动清洗为归档友好格式（减少特殊字符问题）
+- 普通 HTML 输出会自动复制本地资源到 `assets/<book_ascii_slug>/...`
+- 复制后的资源名与引用路径转为 ASCII 安全格式（含哈希后缀）
+- 打包时会对本地 `img src` 再做内联，降低转换后图片失效风险
+- 输出 HTML 会注入 `<title>` 与 `dc.*` 元数据，便于 Calibre 识别
+
+## 翻译执行流程（运行时）
+
+1. 启动 API 预检（可通过 `--skip-api-check` 关闭）  
+2. 读取输入并分词/分段  
+3. 按 chunk 策略调用模型翻译  
+4. 实时进度输出（Prepare / Chunk Start / Chunk API / Chunk OK）  
+5. 失败时重试，必要时自动降档 chunk  
+6. 按需写入断点文件并支持续跑  
+7. 完成后输出 HTML/Markdown，并可选后打包
+
 ## 常用参数
 
+- `--config`：配置文件路径（默认 `config.json`）
+- `--prompt`：Prompt 文件路径（默认 `prompt.txt`）
 - `--suffix`：输出后缀（默认 `_CN`）
 - `--skip-existing`：跳过已存在输出
-- `--config`：指定配置文件路径
-- `--prompt`：指定 prompt 文件路径（默认 `prompt.txt`）
-- `--reasoning-effort`：覆盖 `low/medium/high`
-- `--output-style bilingual|translated`：双语或仅译文输出
-- `--html-translation-style blockquote|paragraph|details`：HTML 双语模式下译文块样式
-- `--post-package none|htmlz|epubv3|both`：输出 HTML 后可选继续打包
-- `--htmlz-title`：覆盖 HTML 元数据标题
-- `--htmlz-author`：设置作者元数据
-- `--htmlz-language`：设置语言元数据（默认 `zh-CN`）
-- `--htmlz-identifier`：设置标识符元数据
-- `--htmlz-publisher`：设置出版社元数据
-- `--no-resume`：关闭断点续跑（默认开启）
+- `--output-style bilingual|translated`：双语/仅译文
+- `--html-translation-style blockquote|paragraph|details`：HTML 双语样式
+- `--post-package none|htmlz|epubv3|both`：HTML 后处理打包
+- `--no-resume`：关闭断点续跑
 - `--no-realtime-write`：关闭实时写入
-- `--skip-api-check`：跳过启动前 API 预检
-- `--api-check-only`：仅执行 API 预检并退出
+- `--skip-api-check`：跳过启动预检
+- `--api-check-only`：仅执行预检并退出
 
-仅运行 `python3 translate.py`（不带参数）时会进入交互式模式，可选择工作模式并填写路径。
-交互式路径输入支持 shell 转义形式（如 `\ `），并会在启动前校验路径是否存在。
-若 `prompt.txt` 不存在，程序会尝试从 `prompt.example.txt` 自动创建。
+## 稳定性与续跑
 
-## HTML / EPUB -> HTMLZ 优化输出说明
+- 默认开启断点续跑，状态写入输出旁的 `*.resume.json`
+- 续跑只恢复进度和上下文，不恢复旧分块参数（使用当前配置）
+- 若服务端不支持 `reasoning` 参数，会自动回退继续运行
 
-- 支持输入：`.html` / `.htm` / `.epub`（目录模式会同时扫描 `.md/.markdown/.html/.htm/.epub`）
-- HTML 输入默认输出为“HTMLZ 友好”HTML（不自动打包，便于先校对再手动打包）
-- EPUB 输入会先抽取 spine 顺序的章节 HTML，再按同样规则输出为 `.html`
-- 输出文件名会自动清洗为归档友好格式（例如去除书名号、空白归一）
-- 普通 HTML 输出会自动复制本地引用资源到输出目录下 `assets/<book_ascii_slug>/`
-- 复制后的资源名与引用路径会转为 ASCII 安全格式（含哈希后缀），降低 HTMLZ/EPUB 转换时的路径编码兼容问题
-- 输出文件会注入 `<title>` 与 `dc.*` 元数据标签，便于后续 Calibre 识别
-- 双语模式下保留原始 HTML 行，并在可翻译段落下方插入译文块（默认 `blockquote`）
-- 可选 `--post-package` 在 HTML 生成后继续输出 `.htmlz` 或 `.epub`（EPUB3）文件
-- 默认启用断点续跑：异常中断后再次运行会从输出旁边的 `.resume.json` 继续
-- 可通过 `--html-translation-style` 切换样式：
-  - `blockquote`（推荐，EPUB 兼容性最好）
-  - `paragraph`（普通段落样式，最朴素）
-  - `details`（折叠块，部分阅读器可能不支持）
-
-## 稳定性说明
-
-- 默认会在正式翻译前执行一次 API 预检（连通性、模型返回结构、基础解析），预检通过后才进入翻译
-- 断点文件：默认在输出文件旁写入 `*.resume.json`，任务成功完成后自动删除
-- 续跑条件：输入内容与输出模式匹配时会自动恢复；不匹配会自动忽略旧断点并重新开始
-- API 兼容：若服务端不支持 `reasoning` 参数，脚本会自动回退并继续翻译
-- 参数变更兼容：续跑只恢复进度与上下文，分块策略始终使用当前配置
-
-## 推荐默认参数（已在 example 配置中给出）
+## 推荐参数（`config.example.json`）
 
 - `chunk_size: 4`
 - `max_chunk_segments: 80`
@@ -102,3 +118,7 @@ python3 translate.py
 - `summary_interval_batches: 10`
 - `summary_interval_chars: 16000`
 - `reasoning.effort: low`
+
+## 致谢
+
+- GPT-5.3-Codex
