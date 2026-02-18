@@ -29,6 +29,9 @@ cp config.example.json config.json
 ```bash
 python3 translate_markdown.py "/path/to/novel.md"
 python3 translate_markdown.py "/path/to/novel.html"
+python3 translate_markdown.py "/path/to/novel.epub"
+python3 translate_markdown.py "/path/to/novel.html" --htmlz-title "Book Title" --htmlz-author "Author Name"
+python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 ```
 
 ## 常用参数
@@ -40,17 +43,35 @@ python3 translate_markdown.py "/path/to/novel.html"
 - `--reasoning-effort`：覆盖 `low/medium/high`
 - `--output-style bilingual|translated`：双语或仅译文输出
 - `--html-translation-style blockquote|paragraph|details`：HTML 双语模式下译文块样式
+- `--post-package none|htmlz|epubv3|both`：输出 HTML 后可选继续打包
+- `--htmlz-title`：覆盖 HTML 元数据标题
+- `--htmlz-author`：设置作者元数据
+- `--htmlz-language`：设置语言元数据（默认 `zh-CN`）
+- `--htmlz-identifier`：设置标识符元数据
+- `--htmlz-publisher`：设置出版社元数据
+- `--no-resume`：关闭断点续跑（默认开启）
 - `--no-realtime-write`：关闭实时写入
 
-## HTML 双语输出说明
+## HTML / EPUB -> HTMLZ 优化输出说明
 
-- 支持输入：`.html` / `.htm`（目录模式会同时扫描 `.md/.markdown/.html/.htm`）
-- 双语模式下保留原始 HTML 行，并在可翻译段落下方插入 `<blockquote>` 译文块
-- 译文块使用轻量内联样式（缩进 + 左边线），便于 Calibre 手动转换 EPUB 时保留对照层次
+- 支持输入：`.html` / `.htm` / `.epub`（目录模式会同时扫描 `.md/.markdown/.html/.htm/.epub`）
+- HTML 输入默认输出为“HTMLZ 友好”HTML（不自动打包，便于先校对再手动打包）
+- EPUB 输入会先抽取 spine 顺序的章节 HTML，再按同样规则输出为 `.html`
+- 输出文件名会自动清洗为归档友好格式（例如去除书名号、空白归一）
+- 输出文件会注入 `<title>` 与 `dc.*` 元数据标签，便于后续 Calibre 识别
+- 双语模式下保留原始 HTML 行，并在可翻译段落下方插入译文块（默认 `blockquote`）
+- 可选 `--post-package` 在 HTML 生成后继续输出 `.htmlz` 或 `.epub`（EPUB3）文件
+- 默认启用断点续跑：异常中断后再次运行会从输出旁边的 `.resume.json` 继续
 - 可通过 `--html-translation-style` 切换样式：
   - `blockquote`（推荐，EPUB 兼容性最好）
   - `paragraph`（普通段落样式，最朴素）
   - `details`（折叠块，部分阅读器可能不支持）
+
+## 稳定性说明
+
+- 断点文件：默认在输出文件旁写入 `*.resume.json`，任务成功完成后自动删除
+- 续跑条件：输入内容与输出模式匹配时会自动恢复；不匹配会自动忽略旧断点并重新开始
+- API 兼容：若服务端不支持 `reasoning` 参数，脚本会自动回退并继续翻译
 
 ## 推荐默认参数（已在 example 配置中给出）
 
