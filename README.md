@@ -32,6 +32,7 @@ python3 translate_markdown.py "/path/to/novel.html"
 python3 translate_markdown.py "/path/to/novel.epub"
 python3 translate_markdown.py "/path/to/novel.html" --htmlz-title "Book Title" --htmlz-author "Author Name"
 python3 translate_markdown.py "/path/to/novel.epub" --post-package both
+python3 translate_markdown.py
 ```
 
 ## 常用参数
@@ -53,6 +54,8 @@ python3 translate_markdown.py "/path/to/novel.epub" --post-package both
 - `--no-realtime-write`：关闭实时写入
 - `--skip-api-check`：跳过启动前 API 预检
 - `--api-check-only`：仅执行 API 预检并退出
+
+仅运行 `python3 translate_markdown.py`（不带参数）时会进入交互式模式，可选择工作模式并填写路径。
 
 ## HTML / EPUB -> HTMLZ 优化输出说明
 

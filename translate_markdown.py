@@ -7,6 +7,7 @@ import mimetypes
 import posixpath
 import re
 import shutil
+import sys
 import time
 import unicodedata
 import uuid
@@ -2168,8 +2169,79 @@ def parse_args():
     return parser.parse_args()
 
 
+def _input_with_default(prompt: str, default: str) -> str:
+    raw = input(f"{prompt} [{default}]: ").strip()
+    return raw if raw else default
+
+
+def _input_yes_no(prompt: str, default_yes: bool = True) -> bool:
+    hint = "Y/n" if default_yes else "y/N"
+    raw = input(f"{prompt} ({hint}): ").strip().lower()
+    if not raw:
+        return default_yes
+    return raw in {"y", "yes"}
+
+
+def _select_mode_with_default(prompt: str, choices: Dict[str, str], default: str) -> str:
+    value = input(f"{prompt} [{default}]: ").strip()
+    if not value:
+        return default
+    return value if value in choices else default
+
+
+def _interactive_setup(args):
+    print("\n=== Interactive Mode ===")
+    print("1) Translate only (no post-package)")
+    print("2) Translate + package htmlz")
+    print("3) Translate + package epubv3")
+    print("4) Translate + package both")
+    print("5) API check only")
+
+    mode_map = {
+        "1": "none",
+        "2": "htmlz",
+        "3": "epubv3",
+        "4": "both",
+        "5": "api_check_only",
+    }
+    mode_choice = _select_mode_with_default("Select work mode", mode_map, "1")
+    mode_value = mode_map[mode_choice]
+
+    args.skip_api_check = False
+    if mode_value == "api_check_only":
+        args.api_check_only = True
+        args.input_path = None
+        return args
+
+    args.api_check_only = False
+    args.post_package = mode_value
+    args.input_path = ""
+    while not args.input_path:
+        args.input_path = input("Input file/folder path: ").strip().strip("'").strip('"')
+    args.suffix = _input_with_default("Output suffix", args.suffix)
+
+    style_map = {"1": "bilingual", "2": "translated"}
+    print("Output style: 1) bilingual  2) translated")
+    style_choice = _select_mode_with_default("Select output style", style_map, "1")
+    args.output_style = style_map[style_choice]
+
+    html_style_map = {"1": "blockquote", "2": "paragraph", "3": "details"}
+    print("HTML translation style: 1) blockquote  2) paragraph  3) details")
+    html_style_choice = _select_mode_with_default("Select HTML translation style", html_style_map, "1")
+    args.html_translation_style = html_style_map[html_style_choice]
+
+    args.skip_existing = _input_yes_no("Skip existing outputs", default_yes=False)
+    enable_resume = _input_yes_no("Enable resume", default_yes=True)
+    args.no_resume = not enable_resume
+    enable_realtime = _input_yes_no("Enable realtime write", default_yes=True)
+    args.no_realtime_write = not enable_realtime
+    return args
+
+
 if __name__ == "__main__":
     args = parse_args()
+    if len(sys.argv) == 1:
+        args = _interactive_setup(args)
     translator = MarkdownNovelTranslator(
         config_path=args.config,
         prompt_path=args.prompt,
