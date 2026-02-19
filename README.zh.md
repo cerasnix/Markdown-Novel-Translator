@@ -54,7 +54,7 @@ python3 translate.py
 ### 可选后处理打包
 
 - `--post-package htmlz`：HTML 输出后生成 `.htmlz`
-- `--post-package epubv3`：HTML 输出后生成 `.epub`
+- `--post-package epub`：HTML 输出后生成兼容版 `.epub`（`epubv3` 仍可作为别名）
 - `--post-package both`：同时生成 `.htmlz` 和 `.epub`
 
 ## EPUB 输入处理流程
@@ -64,7 +64,7 @@ python3 translate.py
 1. 读取 `META-INF/container.xml`，定位 OPF
 2. 解析 OPF 的 `manifest + spine`，按 spine 顺序抽取章节
 3. 提取章节 `<body>` HTML/XHTML，并拼接为统一 HTML 流
-4. 内联 EPUB 内部图片（`img src` -> `data:`）降低资源丢失风险
+4. 保留章节 HTML；在打包阶段将 `data:`/本地资源落盘为实体文件
 5. 使用与 HTML 相同的分块翻译流程执行翻译
 6. 输出 `.html`，并可选继续打包 `.htmlz/.epub`
 
@@ -75,7 +75,10 @@ python3 translate.py
 - 输出文件名会自动清洗，减少归档与转换时的特殊字符问题
 - 普通 HTML 输出会自动复制本地资源到 `assets/<book_ascii_slug>/...`
 - 资源文件名与引用路径会重写为 ASCII 安全格式（含哈希后缀）
-- 打包阶段会再次处理本地 `img src` 内联，降低图片失效概率
+- 打包阶段（`htmlz` / `epub`）会将 `data:` 与本地资源写为实体文件并重写引用
+- EPUB 打包会把这些资源注册进 OPF manifest，并写入 `toc.ncx` 提升电纸书兼容性
+- 若章节 XHTML 校验失败，打包会自动降级为纯文本安全 XHTML，减少设备“解析失败”
+- EPUB 打包会自动注入响应式图片样式，并移除 `<img>` 固定 `width/height`，优化电纸书显示
 - 输出 HTML 会注入 `<title>` 与 `dc.*` 元数据，便于 Calibre 识别
 
 ## 运行时处理流程
@@ -96,7 +99,7 @@ python3 translate.py
 - `--skip-existing`：跳过已存在输出
 - `--output-style bilingual|translated`
 - `--html-translation-style blockquote|paragraph|details`
-- `--post-package none|htmlz|epubv3|both`
+- `--post-package none|htmlz|epub|epubv3|both`
 - `--no-resume`
 - `--no-realtime-write`
 - `--skip-api-check`

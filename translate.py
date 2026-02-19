@@ -81,6 +81,18 @@ HTML_ASSET_TAG_ATTRS = {
     "object": {"data"},
     "embed": {"src"},
 }
+IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+IMG_DIM_ATTR_RE = re.compile(
+    r"\s+(?:width|height)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+    re.IGNORECASE,
+)
+EPUB_RESPONSIVE_STYLE_BLOCK = (
+    '  <style type="text/css">\n'
+    "    img,svg,video,canvas{max-width:100% !important;height:auto !important;}\n"
+    "    figure{max-width:100% !important;margin:1em auto !important;}\n"
+    "    body{overflow-wrap:anywhere;word-break:break-word;}\n"
+    "  </style>\n"
+)
 
 
 @dataclass
@@ -395,24 +407,141 @@ class MarkdownNovelTranslator:
             "publisher": publisher,
         }
 
-    def _inline_local_image_sources(self, html_text: str, base_dir: Path) -> str:
-        def replace_image(match: re.Match) -> str:
-            prefix, quote, src_value = match.groups()
-            lower_src = src_value.lower()
-            if lower_src.startswith(("data:", "http:", "https:", "//", "#")):
+    def _parse_base64_data_uri(self, url: str) -> Tuple[Optional[str], Optional[bytes]]:
+        raw = (url or "").strip()
+        if not raw.lower().startswith("data:"):
+            return None, None
+        try:
+            header, encoded_payload = raw[5:].split(",", 1)
+        except ValueError:
+            return None, None
+
+        header_parts = [part.strip() for part in header.split(";") if part.strip()]
+        if "base64" not in {part.lower() for part in header_parts}:
+            return None, None
+
+        media_type = "application/octet-stream"
+        if header_parts and "/" in header_parts[0]:
+            media_type = header_parts[0].lower()
+
+        compact_payload = re.sub(r"\s+", "", encoded_payload)
+        try:
+            payload = base64.b64decode(compact_payload, validate=False)
+        except Exception:
+            return None, None
+        if not payload:
+            return None, None
+        return media_type, payload
+
+    def _media_type_to_extension(self, media_type: str, fallback: str = ".bin") -> str:
+        ext = mimetypes.guess_extension((media_type or "").strip().lower())
+        if not ext:
+            return fallback
+        if ext == ".jpe":
+            return ".jpg"
+        return ext.lower()
+
+    def _materialize_assets_for_packaging(
+        self,
+        html_text: str,
+        source_base_dir: Path,
+        asset_dir_in_package: str,
+        asset_href_prefix: str,
+    ) -> Tuple[str, List[Dict[str, object]]]:
+        asset_dir = asset_dir_in_package.strip("/").replace("\\", "/") or "images"
+        href_prefix = asset_href_prefix.strip().replace("\\", "/").rstrip("/")
+        assets_by_key: Dict[str, Dict[str, object]] = {}
+
+        def ensure_asset(
+            payload: bytes,
+            media_type: str,
+            name_hint: str,
+        ) -> Dict[str, object]:
+            digest = hashlib.sha1(payload).hexdigest()[:16]
+            key = f"{media_type}:{digest}"
+            existing = assets_by_key.get(key)
+            if existing is not None:
+                return existing
+
+            ext = self._media_type_to_extension(media_type)
+            safe_stem = self._sanitize_ascii_component(name_hint, "asset")
+            filename = f"{safe_stem}_{digest}{ext}"
+            package_href = f"{asset_dir}/{filename}"
+            asset = {
+                "href": package_href,
+                "media_type": media_type,
+                "payload": payload,
+            }
+            assets_by_key[key] = asset
+            return asset
+
+        def rewrite_url(raw_url: str) -> str:
+            raw = (raw_url or "").strip()
+            if not raw:
+                return raw_url
+            lowered = raw.lower()
+            if lowered.startswith(("http:", "https:", "//", "#", "mailto:", "javascript:", "tel:")):
+                return raw_url
+            if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", raw) and not lowered.startswith("data:"):
+                return raw_url
+
+            payload: Optional[bytes] = None
+            media_type: Optional[str] = None
+            name_hint = "asset"
+
+            if lowered.startswith("data:"):
+                media_type, payload = self._parse_base64_data_uri(raw)
+                name_hint = "embedded"
+            else:
+                parsed = urlsplit(raw)
+                local_rel = unquote(parsed.path)
+                if not local_rel or local_rel.startswith("/"):
+                    return raw_url
+                local_path = (source_base_dir / local_rel).resolve()
+                if not local_path.exists() or not local_path.is_file():
+                    return raw_url
+                payload = local_path.read_bytes()
+                media_type = (
+                    mimetypes.guess_type(local_path.as_posix())[0]
+                    or "application/octet-stream"
+                )
+                name_hint = local_path.stem or "asset"
+
+            if not payload or not media_type:
+                return raw_url
+
+            asset = ensure_asset(payload=payload, media_type=media_type, name_hint=name_hint)
+            href = str(asset["href"])
+            if href_prefix:
+                href = f"{href_prefix}/{href}"
+            return href
+
+        def replace_attr(match: re.Match) -> str:
+            tag_name = (match.group("tag") or "").lower()
+            attr_name = (match.group("attr") or "").lower()
+            allowed_attrs = HTML_ASSET_TAG_ATTRS.get(tag_name)
+            if not allowed_attrs or attr_name not in allowed_attrs:
                 return match.group(0)
+            rewritten = rewrite_url(match.group("url"))
+            return f"{match.group(1)}{match.group('quote')}{rewritten}{match.group('quote')}"
 
-            src_path = src_value.split("#", 1)[0]
-            file_path = (base_dir / src_path).resolve()
-            if not file_path.exists() or not file_path.is_file():
-                return match.group(0)
+        def replace_srcset(match: re.Match) -> str:
+            srcset_value = match.group("srcset")
+            entries = [item.strip() for item in srcset_value.split(",")]
+            rewritten_entries: List[str] = []
+            for entry in entries:
+                if not entry:
+                    continue
+                parts = entry.split()
+                first_url = parts[0]
+                parts[0] = rewrite_url(first_url)
+                rewritten_entries.append(" ".join(parts))
+            rewritten_srcset = ", ".join(rewritten_entries)
+            return f"{match.group(1)}{match.group('quote')}{rewritten_srcset}{match.group('quote')}"
 
-            mime_type = mimetypes.guess_type(file_path.as_posix())[0] or "application/octet-stream"
-            payload = file_path.read_bytes()
-            data_uri = f"data:{mime_type};base64,{base64.b64encode(payload).decode('ascii')}"
-            return f"{prefix}{quote}{data_uri}{quote}"
-
-        return HTML_IMG_SRC_RE.sub(replace_image, html_text)
+        rewritten_html = HTML_ASSET_URL_ATTR_RE.sub(replace_attr, html_text)
+        rewritten_html = HTML_ASSET_SRCSET_RE.sub(replace_srcset, rewritten_html)
+        return rewritten_html, list(assets_by_key.values())
 
     def _normalize_html_to_xhtml_fragment(self, fragment: str) -> str:
         def close_void_tag(match: re.Match) -> str:
@@ -454,10 +583,18 @@ class MarkdownNovelTranslator:
         )
 
     def _package_htmlz(self, html_output_path: Path, metadata: Dict[str, str], html_text: str) -> Path:
+        packaged_html, assets = self._materialize_assets_for_packaging(
+            html_text=html_text,
+            source_base_dir=html_output_path.parent,
+            asset_dir_in_package="images",
+            asset_href_prefix="",
+        )
         htmlz_path = html_output_path.with_suffix(".htmlz")
         opf_content = self._build_htmlz_metadata_opf(metadata)
         with zipfile.ZipFile(htmlz_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("index.html", html_text)
+            zf.writestr("index.html", packaged_html)
+            for asset in assets:
+                zf.writestr(str(asset["href"]), bytes(asset["payload"]))
             zf.writestr("metadata.opf", opf_content)
         return htmlz_path
 
@@ -465,7 +602,7 @@ class MarkdownNovelTranslator:
         safe_title = html.escape(title, quote=False)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">\n'
+            '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN" xml:lang="zh-CN">\n'
             "<head>\n"
             f"  <title>{safe_title} - Navigation</title>\n"
             '  <meta charset="utf-8"/>\n'
@@ -481,26 +618,104 @@ class MarkdownNovelTranslator:
             "</html>\n"
         )
 
-    def _build_epub_chapter_xhtml(self, title: str, language: str, html_text: str) -> str:
+    def _normalize_epub_image_tags_for_device(self, fragment: str) -> str:
+        def strip_img_dimensions(match: re.Match) -> str:
+            return IMG_DIM_ATTR_RE.sub("", match.group(0))
+
+        return IMG_TAG_RE.sub(strip_img_dimensions, fragment)
+
+    def _build_epub_ncx(self, title: str, language: str, identifier: str) -> str:
+        safe_title = html.escape(title, quote=False)
+        safe_language = html.escape(language or "zh-CN", quote=True)
+        safe_identifier = html.escape(identifier or f"urn:uuid:{uuid.uuid4()}", quote=False)
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="'
+            f'{safe_language}">\n'
+            "  <head>\n"
+            '    <meta name="dtb:uid" content="'
+            f'{safe_identifier}"/>\n'
+            '    <meta name="dtb:depth" content="1"/>\n'
+            '    <meta name="dtb:totalPageCount" content="0"/>\n'
+            '    <meta name="dtb:maxPageNumber" content="0"/>\n'
+            "  </head>\n"
+            "  <docTitle><text>"
+            f"{safe_title}</text></docTitle>\n"
+            "  <navMap>\n"
+            '    <navPoint id="navpoint-1" playOrder="1">\n'
+            f"      <navLabel><text>{safe_title}</text></navLabel>\n"
+            '      <content src="text/chapter.xhtml"/>\n'
+            "    </navPoint>\n"
+            "  </navMap>\n"
+            "</ncx>\n"
+        )
+
+    def _is_valid_xml_document(self, xml_text: str) -> bool:
+        try:
+            ET.fromstring(xml_text)
+            return True
+        except ET.ParseError:
+            return False
+
+    def _build_safe_fallback_chapter_xhtml(self, title: str, language: str, html_text: str) -> str:
         body_match = HTML_BODY_RE.search(html_text)
-        body_content = body_match.group("body").strip() if body_match else html_text.strip()
-        body_content = self._normalize_html_to_xhtml_fragment(body_content)
+        body_content = body_match.group("body") if body_match else html_text
+        plain_text = HTML_TAG_RE.sub("", body_content)
+        plain_text = html.unescape(plain_text)
+        lines = [line.strip() for line in plain_text.splitlines() if line.strip()]
+        if not lines:
+            lines = [plain_text.strip()] if plain_text.strip() else [title]
+        safe_paragraphs = "\n".join(f"  <p>{html.escape(line, quote=False)}</p>" for line in lines[:4000])
         safe_title = html.escape(title, quote=False)
         safe_language = html.escape(language or "zh-CN", quote=True)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
-            f'<html xmlns="http://www.w3.org/1999/xhtml" lang="{safe_language}">\n'
+            f'<html xmlns="http://www.w3.org/1999/xhtml" lang="{safe_language}" xml:lang="{safe_language}">\n'
             "<head>\n"
             '  <meta charset="utf-8"/>\n'
             f"  <title>{safe_title}</title>\n"
+            f"{EPUB_RESPONSIVE_STYLE_BLOCK}"
+            "</head>\n"
+            "<body>\n"
+            f"{safe_paragraphs}\n"
+            "</body>\n"
+            "</html>\n"
+        )
+
+    def _build_epub_chapter_xhtml(self, title: str, language: str, html_text: str) -> str:
+        body_match = HTML_BODY_RE.search(html_text)
+        body_content = body_match.group("body").strip() if body_match else html_text.strip()
+        body_content = self._normalize_html_to_xhtml_fragment(body_content)
+        body_content = self._normalize_epub_image_tags_for_device(body_content)
+        safe_title = html.escape(title, quote=False)
+        safe_language = html.escape(language or "zh-CN", quote=True)
+        chapter = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<html xmlns="http://www.w3.org/1999/xhtml" lang="{safe_language}" xml:lang="{safe_language}">\n'
+            "<head>\n"
+            '  <meta charset="utf-8"/>\n'
+            f"  <title>{safe_title}</title>\n"
+            f"{EPUB_RESPONSIVE_STYLE_BLOCK}"
             "</head>\n"
             "<body>\n"
             f"{body_content}\n"
             "</body>\n"
             "</html>\n"
         )
+        if self._is_valid_xml_document(chapter):
+            return chapter
+        self._print(
+            "EPUB Warn",
+            "Invalid XHTML detected in chapter content; using plain-text-safe fallback for compatibility.",
+            "yellow",
+        )
+        return self._build_safe_fallback_chapter_xhtml(title=title, language=language, html_text=html_text)
 
-    def _build_epub_package_opf(self, metadata: Dict[str, str]) -> str:
+    def _build_epub_package_opf(
+        self,
+        metadata: Dict[str, str],
+        asset_manifest_items: List[Dict[str, str]],
+    ) -> str:
         title = html.escape(metadata.get("title") or "Untitled", quote=False)
         language = html.escape(metadata.get("language") or "zh-CN", quote=False)
         author = html.escape(metadata.get("author") or "", quote=False)
@@ -508,36 +723,65 @@ class MarkdownNovelTranslator:
         publisher = html.escape(metadata.get("publisher") or "", quote=False)
         creator_line = f"    <dc:creator>{author}</dc:creator>\n" if author else ""
         publisher_line = f"    <dc:publisher>{publisher}</dc:publisher>\n" if publisher else ""
+        manifest_lines = [
+            '    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"/>\n',
+            '    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>\n',
+            '    <item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/>\n',
+        ]
+        for index, item in enumerate(asset_manifest_items, start=1):
+            href = html.escape(item["href"], quote=True)
+            media_type = html.escape(item["media_type"], quote=True)
+            manifest_lines.append(
+                f'    <item id="asset_{index}" href="{href}" media-type="{media_type}"/>\n'
+            )
+        manifest_block = "".join(manifest_lines)
+
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">\n'
-            "  <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n"
+            '<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">\n'
+            "  <metadata xmlns:opf=\"http://www.idpf.org/2007/opf\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n"
             f"    <dc:identifier id=\"bookid\">{identifier}</dc:identifier>\n"
             f"    <dc:title>{title}</dc:title>\n"
             f"    <dc:language>{language}</dc:language>\n"
             f"{creator_line}"
             f"{publisher_line}"
-            '    <meta property="dcterms:modified">2000-01-01T00:00:00Z</meta>\n'
             "  </metadata>\n"
             "  <manifest>\n"
-            '    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>\n'
-            '    <item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/>\n'
+            f"{manifest_block}"
             "  </manifest>\n"
-            "  <spine>\n"
+            '  <spine toc="ncx">\n'
             '    <itemref idref="chapter"/>\n'
             "  </spine>\n"
+            "  <guide>\n"
+            '    <reference type="text" href="text/chapter.xhtml" title="Start"/>\n'
+            "  </guide>\n"
             "</package>\n"
         )
 
-    def _package_epubv3(self, html_output_path: Path, metadata: Dict[str, str], html_text: str) -> Path:
+    def _package_epub_compatible(self, html_output_path: Path, metadata: Dict[str, str], html_text: str) -> Path:
+        packaged_html, assets = self._materialize_assets_for_packaging(
+            html_text=html_text,
+            source_base_dir=html_output_path.parent,
+            asset_dir_in_package="images",
+            asset_href_prefix="../",
+        )
         epub_path = html_output_path.with_suffix(".epub")
         chapter_xhtml = self._build_epub_chapter_xhtml(
             title=metadata.get("title") or html_output_path.stem,
             language=metadata.get("language") or "zh-CN",
-            html_text=html_text,
+            html_text=packaged_html,
         )
         nav_xhtml = self._build_epub_nav_xhtml(metadata.get("title") or html_output_path.stem)
-        package_opf = self._build_epub_package_opf(metadata)
+        toc_ncx = self._build_epub_ncx(
+            title=metadata.get("title") or html_output_path.stem,
+            language=metadata.get("language") or "zh-CN",
+            identifier=metadata.get("identifier") or "",
+        )
+        asset_manifest_items = [
+            {"href": str(asset["href"]), "media_type": str(asset["media_type"])}
+            for asset in assets
+        ]
+        package_opf = self._build_epub_package_opf(metadata, asset_manifest_items)
         container_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
@@ -551,7 +795,10 @@ class MarkdownNovelTranslator:
             zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
             zf.writestr("META-INF/container.xml", container_xml, compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/nav.xhtml", nav_xhtml, compress_type=zipfile.ZIP_DEFLATED)
+            zf.writestr("OEBPS/toc.ncx", toc_ncx, compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/text/chapter.xhtml", chapter_xhtml, compress_type=zipfile.ZIP_DEFLATED)
+            for asset in assets:
+                zf.writestr(f"OEBPS/{asset['href']}", bytes(asset["payload"]), compress_type=zipfile.ZIP_DEFLATED)
             zf.writestr("OEBPS/package.opf", package_opf, compress_type=zipfile.ZIP_DEFLATED)
         return epub_path
 
@@ -559,13 +806,12 @@ class MarkdownNovelTranslator:
         if package_mode == "none":
             return []
         html_text = output_html_path.read_text(encoding="utf-8")
-        html_text = self._inline_local_image_sources(html_text, output_html_path.parent)
         metadata = self._extract_html_metadata(html_text, fallback_title=output_html_path.stem)
         generated: List[Path] = []
         if package_mode in {"htmlz", "both"}:
             generated.append(self._package_htmlz(output_html_path, metadata, html_text))
-        if package_mode in {"epubv3", "both"}:
-            generated.append(self._package_epubv3(output_html_path, metadata, html_text))
+        if package_mode in {"epub", "epubv3", "both"}:
+            generated.append(self._package_epub_compatible(output_html_path, metadata, html_text))
         return generated
 
     def _resolve_epub_path(self, base_dir: str, href: str) -> str:
@@ -2351,9 +2597,9 @@ def parse_args():
     )
     parser.add_argument(
         "--post-package",
-        choices=["none", "htmlz", "epubv3", "both"],
+        choices=["none", "htmlz", "epub", "epubv3", "both"],
         default="none",
-        help="Optional packaging after HTML output: htmlz, epubv3, both, or none",
+        help="Optional packaging after HTML output: htmlz, epub (compatible), both, or none. epubv3 is kept as alias.",
     )
     parser.add_argument(
         "--htmlz-title",
@@ -2443,14 +2689,14 @@ def _interactive_setup(args):
     print("\n=== Interactive Mode ===")
     print("1) Translate only (no post-package)")
     print("2) Translate + package htmlz")
-    print("3) Translate + package epubv3")
+    print("3) Translate + package epub (compatible)")
     print("4) Translate + package both")
     print("5) API check only")
 
     mode_map = {
         "1": "none",
         "2": "htmlz",
-        "3": "epubv3",
+        "3": "epub",
         "4": "both",
         "5": "api_check_only",
     }

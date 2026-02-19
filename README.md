@@ -54,7 +54,7 @@ python3 translate.py
 ### Optional post-package
 
 - `--post-package htmlz`: generate `.htmlz` after HTML output
-- `--post-package epubv3`: generate `.epub` after HTML output
+- `--post-package epub`: generate compatible `.epub` after HTML output (`epubv3` remains alias)
 - `--post-package both`: generate both
 
 ## EPUB input processing flow
@@ -64,7 +64,7 @@ When input is `.epub`, the script:
 1. Reads `META-INF/container.xml` and locates OPF
 2. Parses OPF `manifest + spine` and extracts chapters in spine order
 3. Collects chapter `<body>` HTML/XHTML into one normalized HTML stream
-4. Inlines EPUB internal images (`img src` -> `data:`) to reduce asset loss
+4. Keeps extracted chapter HTML; packaging stage materializes `data:`/local assets as files
 5. Runs the same chunked translation pipeline as HTML input
 6. Outputs `.html`, then optionally packages to `.htmlz` / `.epub`
 
@@ -75,7 +75,10 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - Output file names are sanitized for archive compatibility
 - Normal HTML output auto-copies local assets to `assets/<book_ascii_slug>/...`
 - Copied asset names and refs are rewritten to ASCII-safe paths (with hash suffix)
-- During packaging, local `img src` can be inlined again to reduce broken images
+- During packaging (`htmlz` / `epub`), `data:` and local assets are written as real files and refs are rewritten
+- EPUB packaging registers extracted assets in OPF manifest and also writes `toc.ncx` for broader e-reader compatibility
+- If generated chapter XHTML is invalid, packaging falls back to a plain-text-safe XHTML chapter to avoid device parse failures
+- EPUB packaging auto-injects responsive image CSS and removes fixed `width/height` on `<img>` for e-ink readability
 - Output HTML injects `<title>` and `dc.*` metadata for Calibre recognition
 
 ## Runtime pipeline
@@ -96,7 +99,7 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - `--skip-existing`: skip existing outputs
 - `--output-style bilingual|translated`
 - `--html-translation-style blockquote|paragraph|details`
-- `--post-package none|htmlz|epubv3|both`
+- `--post-package none|htmlz|epub|epubv3|both`
 - `--no-resume`
 - `--no-realtime-write`
 - `--skip-api-check`
