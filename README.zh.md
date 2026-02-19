@@ -107,6 +107,10 @@ python3 translate.py
 - 默认开启断点续跑，状态文件位于输出文件旁（`*.resume.json`）
 - 续跑恢复进度与上下文，不恢复旧分块参数（始终使用当前配置）
 - 若服务端不支持 `reasoning` 参数，脚本会自动回退继续运行
+- 会对返回结果做“疑似未翻译”检测：默认使用 `exact_only`（忽略空白/标点后文本一致即判定）；
+  可选启用高相似兜底，且对“短名称/称谓样式”片段做免检以减少误触发
+- 启用 chunk 级回声检测：若单次 API 批次中大多数片段被原样回传，
+  会直接判定该 chunk 失败并进入重试/降档
 
 ## 推荐配置（`config.example.json`）
 
@@ -118,6 +122,17 @@ python3 translate.py
 - `context_tail_segments: 5`
 - `request_timeout_seconds: 300`
 - `api_test_timeout_seconds: 90`
+- `translation_similarity_check: true`
+- `translation_similarity_threshold: 0.96`
+- `translation_similarity_min_chars: 18`
+- `translation_similarity_exact_only: true`
+- `translation_similarity_name_guard: true`
+- `translation_similarity_name_like_max_chars: 24`
+- `translation_chunk_echo_check: true`
+- `translation_chunk_echo_match_ratio: 0.98`
+- `translation_chunk_echo_min_segments: 3`
+- `translation_chunk_echo_min_total_chars: 80`
+- `translation_chunk_echo_min_japanese_segments: 2`
 - `summary_interval_batches: 10`
 - `summary_interval_chars: 16000`
 - `reasoning.effort: low`

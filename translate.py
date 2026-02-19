@@ -1,5 +1,6 @@
 import argparse
 import base64
+import difflib
 import hashlib
 import html
 import json
@@ -53,6 +54,14 @@ BARE_AMP_RE = re.compile(r"&(?!(?:#\d+|#x[0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9._:-]*);
 SPLIT_POINT_RE = re.compile(r"(?:[。！？!?；;](?:[」』”’\"\)\]]*\s*))|(?:\n+)")
 HTML_TRANSLATABLE_TAGS = {"p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "figcaption"}
 BAD_FILENAME_CHARS_RE = re.compile(r"[\\/:*?\"<>|]+")
+JAPANESE_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9f]")
+KANA_CHAR_RE = re.compile(r"[\u3040-\u30ff\uff66-\uff9f]")
+HIRAGANA_CHAR_RE = re.compile(r"[\u3040-\u309f]")
+NAME_LIKE_TEXT_RE = re.compile(
+    r"^[\s\u3040-\u30ff\uff66-\uff9f\u3400-\u4dbf\u4e00-\u9fff々〆ヵヶー・･·\u30fb"
+    r"A-Za-z0-9\-\.'’()（）「」『』【】［］《》]+$"
+)
+SENTENCE_PUNCT_RE = re.compile(r"[。！？!?；;：:、，,]")
 HTML_ASSET_URL_ATTR_RE = re.compile(
     r'(<(?P<tag>[a-zA-Z][\w:-]*)\b[^>]*?\b(?P<attr>src|href|poster|data)\s*=\s*)'
     r'(?P<quote>["\'])(?P<url>[^"\']+)(?P=quote)',
@@ -1209,6 +1218,178 @@ class MarkdownNovelTranslator:
             return None, f"pages_type_invalid type={type(pages).__name__}"
         return None, f"missing_segments_pages expected={expected_count}"
 
+    def _normalize_similarity_text(self, text: str, strip_punctuation: bool = False) -> str:
+        normalized = unicodedata.normalize("NFKC", str(text))
+        normalized = re.sub(r"\s+", "", normalized)
+        if strip_punctuation:
+            normalized = "".join(
+                ch
+                for ch in normalized
+                if not unicodedata.category(ch).startswith(("P", "S"))
+            )
+        return normalized
+
+    def _segment_similarity(self, source_text: str, translated_text: str) -> float:
+        source = self._normalize_similarity_text(source_text)
+        translated = self._normalize_similarity_text(translated_text)
+        if not source and not translated:
+            return 1.0
+        if not source or not translated:
+            return 0.0
+        return difflib.SequenceMatcher(a=source, b=translated).ratio()
+
+    def _is_exact_text_match(self, source_text: str, translated_text: str) -> bool:
+        source = self._normalize_similarity_text(source_text)
+        translated = self._normalize_similarity_text(translated_text)
+        if source and source == translated:
+            return True
+        source_compact = self._normalize_similarity_text(source_text, strip_punctuation=True)
+        translated_compact = self._normalize_similarity_text(translated_text, strip_punctuation=True)
+        return bool(source_compact) and source_compact == translated_compact
+
+    def _detect_chunk_untranslated_echo(
+        self,
+        source_segments: List[str],
+        translated_segments: List[str],
+    ) -> Tuple[bool, int, float]:
+        if len(source_segments) != len(translated_segments):
+            return False, 0, 0.0
+        if not source_segments:
+            return False, 0, 0.0
+
+        enabled = bool(self.config.get("translation_chunk_echo_check", True))
+        if not enabled:
+            return False, 0, 0.0
+
+        min_segments = int(self.config.get("translation_chunk_echo_min_segments", 3))
+        min_segments = max(1, min_segments)
+        if len(source_segments) < min_segments:
+            return False, 0, 0.0
+
+        min_total_chars = int(self.config.get("translation_chunk_echo_min_total_chars", 80))
+        min_total_chars = max(8, min_total_chars)
+        total_chars = sum(
+            len(self._normalize_similarity_text(item, strip_punctuation=True))
+            for item in source_segments
+        )
+        if total_chars < min_total_chars:
+            return False, 0, 0.0
+
+        min_japanese_segments = int(self.config.get("translation_chunk_echo_min_japanese_segments", 2))
+        min_japanese_segments = max(1, min_japanese_segments)
+        japanese_segments = sum(
+            1 for item in source_segments if JAPANESE_CHAR_RE.search(str(item))
+        )
+        if japanese_segments < min_japanese_segments:
+            return False, 0, 0.0
+
+        match_ratio = float(self.config.get("translation_chunk_echo_match_ratio", 0.98))
+        match_ratio = max(0.7, min(1.0, match_ratio))
+
+        exact_match_count = sum(
+            1
+            for source_text, translated_text in zip(source_segments, translated_segments)
+            if self._is_exact_text_match(source_text, translated_text)
+        )
+        ratio = exact_match_count / len(source_segments)
+        return ratio >= match_ratio, exact_match_count, ratio
+
+    def _is_name_like_segment(self, text: str, max_chars: int) -> bool:
+        raw = unicodedata.normalize("NFKC", str(text)).strip()
+        if not raw:
+            return False
+        if "\n" in raw:
+            return False
+        if SENTENCE_PUNCT_RE.search(raw):
+            return False
+        if not NAME_LIKE_TEXT_RE.fullmatch(raw):
+            return False
+        hiragana_count = len(HIRAGANA_CHAR_RE.findall(raw))
+        if hiragana_count > 1:
+            return False
+        compact = self._normalize_similarity_text(raw, strip_punctuation=True)
+        if not compact:
+            return False
+        return len(compact) <= max_chars
+
+    def _is_suspected_untranslated_segment(
+        self,
+        source_text: str,
+        translated_text: str,
+        threshold: float,
+        min_chars: int,
+        exact_only: bool,
+        name_guard: bool,
+        name_like_max_chars: int,
+    ) -> Tuple[bool, float]:
+        source = self._normalize_similarity_text(source_text)
+        translated = self._normalize_similarity_text(translated_text)
+
+        if not source or not translated:
+            return False, 0.0
+        if len(source) < min_chars:
+            return False, 0.0
+        if not JAPANESE_CHAR_RE.search(source):
+            return False, 0.0
+
+        name_like = (
+            name_guard
+            and self._is_name_like_segment(source_text, max_chars=name_like_max_chars)
+        )
+
+        if self._is_exact_text_match(source_text, translated_text):
+            if name_like:
+                return False, 1.0
+            return True, 1.0
+
+        if exact_only:
+            return False, 0.0
+
+        ratio = self._segment_similarity(source, translated)
+        has_translated_kana = bool(KANA_CHAR_RE.search(translated))
+        if name_like:
+            return False, ratio
+        return has_translated_kana and ratio >= threshold, ratio
+
+    def _detect_suspected_untranslated_segments(
+        self,
+        source_segments: List[str],
+        translated_segments: List[str],
+    ) -> List[Tuple[int, float]]:
+        if len(source_segments) != len(translated_segments):
+            return []
+
+        enabled = bool(self.config.get("translation_similarity_check", True))
+        if not enabled:
+            return []
+
+        threshold = float(self.config.get("translation_similarity_threshold", 0.96))
+        threshold = max(0.85, min(0.995, threshold))
+        min_chars = int(self.config.get("translation_similarity_min_chars", 18))
+        min_chars = max(8, min_chars)
+        exact_only = bool(self.config.get("translation_similarity_exact_only", True))
+        name_guard = bool(self.config.get("translation_similarity_name_guard", True))
+        name_like_max_chars = int(self.config.get("translation_similarity_name_like_max_chars", 24))
+        name_like_max_chars = max(8, min(80, name_like_max_chars))
+
+        suspicious: List[Tuple[int, float]] = []
+        for index, (source_text, translated_text) in enumerate(
+            zip(source_segments, translated_segments),
+            start=1,
+        ):
+            flagged, ratio = self._is_suspected_untranslated_segment(
+                source_text=source_text,
+                translated_text=translated_text,
+                threshold=threshold,
+                min_chars=min_chars,
+                exact_only=exact_only,
+                name_guard=name_guard,
+                name_like_max_chars=name_like_max_chars,
+            )
+            if flagged:
+                suspicious.append((index, ratio))
+        return suspicious
+
     def call_api(
         self,
         segment_texts: List[str],
@@ -1273,6 +1454,40 @@ class MarkdownNovelTranslator:
                 self._print(
                     "ParseFail",
                     f"{parse_reason} | keys={list(data.keys())[:8]}",
+                    "yellow",
+                )
+                return None, ""
+            chunk_echo, chunk_match_count, chunk_match_ratio = self._detect_chunk_untranslated_echo(
+                source_segments=segment_texts,
+                translated_segments=translated,
+            )
+            if chunk_echo:
+                self.last_failure_reason = "untranslated_chunk_echo"
+                self._print(
+                    "TranslateCheck",
+                    (
+                        f"chunk_echo_detected={chunk_match_count}/{len(translated)} "
+                        f"ratio={chunk_match_ratio:.2f}"
+                    ),
+                    "yellow",
+                )
+                return None, ""
+            suspicious = self._detect_suspected_untranslated_segments(
+                source_segments=segment_texts,
+                translated_segments=translated,
+            )
+            if suspicious:
+                self.last_failure_reason = "untranslated_similarity"
+                exact_only = bool(self.config.get("translation_similarity_exact_only", True))
+                threshold = float(self.config.get("translation_similarity_threshold", 0.96))
+                mode = "exact_only" if exact_only else f"similarity>={threshold:.2f}"
+                sample = ", ".join(f"#{idx}:{ratio:.2f}" for idx, ratio in suspicious[:6])
+                self._print(
+                    "TranslateCheck",
+                    (
+                        f"suspected_untranslated={len(suspicious)}/{len(translated)} "
+                        f"mode={mode} sample=[{sample}]"
+                    ),
                     "yellow",
                 )
                 return None, ""

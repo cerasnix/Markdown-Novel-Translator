@@ -107,6 +107,11 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - Resume is enabled by default via `*.resume.json` near output file
 - Resume restores progress/context only (chunk policy uses current config)
 - If `reasoning` is unsupported by provider, the script auto-falls back
+- API responses are checked for suspected untranslated segments:
+  default mode is `exact_only` (same text after whitespace/punctuation normalization);
+  optional similarity fallback can be enabled, and name-like short segments are exempted
+- Chunk-level echo detection is enabled: if most items in one API batch are returned as original text,
+  the whole chunk is retried/downgraded immediately
 
 ## Recommended config baseline (`config.example.json`)
 
@@ -118,6 +123,17 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - `context_tail_segments: 5`
 - `request_timeout_seconds: 300`
 - `api_test_timeout_seconds: 90`
+- `translation_similarity_check: true`
+- `translation_similarity_threshold: 0.96`
+- `translation_similarity_min_chars: 18`
+- `translation_similarity_exact_only: true`
+- `translation_similarity_name_guard: true`
+- `translation_similarity_name_like_max_chars: 24`
+- `translation_chunk_echo_check: true`
+- `translation_chunk_echo_match_ratio: 0.98`
+- `translation_chunk_echo_min_segments: 3`
+- `translation_chunk_echo_min_total_chars: 80`
+- `translation_chunk_echo_min_japanese_segments: 2`
 - `summary_interval_batches: 10`
 - `summary_interval_chars: 16000`
 - `reasoning.effort: low`
