@@ -4,3 +4,4 @@ config.json
 prompt.txt
 .DS_Store
 convert_datauri_epub.py
+tmp_*.py
