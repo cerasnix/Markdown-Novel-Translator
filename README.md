@@ -113,6 +113,7 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - API responses are checked for suspected untranslated segments:
   default mode is `exact_only` (same text after whitespace/punctuation normalization);
   optional similarity fallback can be enabled, and name-like short segments are exempted
+  (to reduce false positives for JP→ZH, exact-match checks require a minimum amount of hiragana by default)
 - Chunk-level echo detection is enabled: if most items in one API batch are returned as original text,
   the whole chunk is retried/downgraded immediately
 
@@ -130,6 +131,8 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - `translation_similarity_threshold: 0.96`
 - `translation_similarity_min_chars: 18`
 - `translation_similarity_exact_only: true`
+- `translation_similarity_exact_match_require_hiragana: true`
+- `translation_similarity_exact_match_min_hiragana: 2`
 - `translation_similarity_name_guard: true`
 - `translation_similarity_name_like_max_chars: 24`
 - `translation_chunk_echo_check: true`

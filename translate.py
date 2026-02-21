@@ -1567,6 +1567,8 @@ class MarkdownNovelTranslator:
         exact_only: bool,
         name_guard: bool,
         name_like_max_chars: int,
+        exact_match_require_hiragana: bool,
+        exact_match_min_hiragana: int,
     ) -> Tuple[bool, float]:
         source = self._normalize_similarity_text(source_text)
         translated = self._normalize_similarity_text(translated_text)
@@ -1586,6 +1588,11 @@ class MarkdownNovelTranslator:
         if self._is_exact_text_match(source_text, translated_text):
             if name_like:
                 return False, 1.0
+            if exact_match_require_hiragana:
+                raw = unicodedata.normalize("NFKC", str(source_text))
+                hiragana_count = len(HIRAGANA_CHAR_RE.findall(raw))
+                if hiragana_count < exact_match_min_hiragana:
+                    return False, 1.0
             return True, 1.0
 
         if exact_only:
@@ -1617,6 +1624,13 @@ class MarkdownNovelTranslator:
         name_guard = bool(self.config.get("translation_similarity_name_guard", True))
         name_like_max_chars = int(self.config.get("translation_similarity_name_like_max_chars", 24))
         name_like_max_chars = max(8, min(80, name_like_max_chars))
+        exact_match_require_hiragana = bool(
+            self.config.get("translation_similarity_exact_match_require_hiragana", True)
+        )
+        exact_match_min_hiragana = int(
+            self.config.get("translation_similarity_exact_match_min_hiragana", 2)
+        )
+        exact_match_min_hiragana = max(1, min(10, exact_match_min_hiragana))
 
         suspicious: List[Tuple[int, float]] = []
         for index, (source_text, translated_text) in enumerate(
@@ -1631,6 +1645,8 @@ class MarkdownNovelTranslator:
                 exact_only=exact_only,
                 name_guard=name_guard,
                 name_like_max_chars=name_like_max_chars,
+                exact_match_require_hiragana=exact_match_require_hiragana,
+                exact_match_min_hiragana=exact_match_min_hiragana,
             )
             if flagged:
                 suspicious.append((index, ratio))

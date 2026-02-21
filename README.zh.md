@@ -112,6 +112,7 @@ python3 translate.py
 - 若服务端不支持 `reasoning` 参数，脚本会自动回退继续运行
 - 会对返回结果做“疑似未翻译”检测：默认使用 `exact_only`（忽略空白/标点后文本一致即判定）；
   可选启用高相似兜底，且对“短名称/称谓样式”片段做免检以减少误触发
+  （为减少日译中场景的误判，默认要求原文包含一定数量的平假名才会触发“原样回传”判定）
 - 启用 chunk 级回声检测：若单次 API 批次中大多数片段被原样回传，
   会直接判定该 chunk 失败并进入重试/降档
 
@@ -129,6 +130,8 @@ python3 translate.py
 - `translation_similarity_threshold: 0.96`
 - `translation_similarity_min_chars: 18`
 - `translation_similarity_exact_only: true`
+- `translation_similarity_exact_match_require_hiragana: true`
+- `translation_similarity_exact_match_min_hiragana: 2`
 - `translation_similarity_name_guard: true`
 - `translation_similarity_name_like_max_chars: 24`
 - `translation_chunk_echo_check: true`
