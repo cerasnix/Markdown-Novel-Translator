@@ -114,8 +114,13 @@ This keeps EPUB and HTML review/packaging workflows consistent.
   default mode is `exact_only` (same text after whitespace/punctuation normalization);
   optional similarity fallback can be enabled, and name-like short segments are exempted
   (to reduce false positives for JP→ZH, exact-match checks require a minimum amount of hiragana by default)
+- If the same segment is flagged by `untranslated_similarity` for 3 consecutive attempts,
+  the script stops retries for that file, prints a warning, and writes debug details to
+  `<output>.similarity_debug.log`
 - Chunk-level echo detection is enabled: if most items in one API batch are returned as original text,
   the whole chunk is retried/downgraded immediately
+- Interactive mode now asks input path first; when an in-progress checkpoint with saved run options is found,
+  it auto-restores those options and skips re-selection prompts
 
 ## Recommended config baseline (`config.example.json`)
 
@@ -135,6 +140,7 @@ This keeps EPUB and HTML review/packaging workflows consistent.
 - `translation_similarity_exact_match_min_hiragana: 2`
 - `translation_similarity_name_guard: true`
 - `translation_similarity_name_like_max_chars: 24`
+- `translation_similarity_abort_consecutive: 3`
 - `translation_chunk_echo_check: true`
 - `translation_chunk_echo_match_ratio: 0.98`
 - `translation_chunk_echo_min_segments: 3`

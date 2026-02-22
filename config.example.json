@@ -19,6 +19,7 @@
   "translation_similarity_exact_match_min_hiragana": 2,
   "translation_similarity_name_guard": true,
   "translation_similarity_name_like_max_chars": 24,
+  "translation_similarity_abort_consecutive": 3,
   "translation_chunk_echo_check": true,
   "translation_chunk_echo_match_ratio": 0.98,
   "translation_chunk_echo_min_segments": 3,

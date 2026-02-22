@@ -59,8 +59,9 @@ KANA_CHAR_RE = re.compile(r"[\u3040-\u30ff\uff66-\uff9f]")
 HIRAGANA_CHAR_RE = re.compile(r"[\u3040-\u309f]")
 NAME_LIKE_TEXT_RE = re.compile(
     r"^[\s\u3040-\u30ff\uff66-\uff9f\u3400-\u4dbf\u4e00-\u9fff々〆ヵヶー・･·\u30fb"
-    r"A-Za-z0-9\-\.'’()（）「」『』【】［］《》]+$"
+    r"A-Za-z0-9_@\-\.'’()（）「」『』【】［］《》]+$"
 )
+HANDLE_SUFFIX_RE = re.compile(r"[@＠][A-Za-z0-9][A-Za-z0-9_.-]*\s*$")
 SENTENCE_PUNCT_RE = re.compile(r"[。！？!?；;：:、，,]")
 HTML_ASSET_URL_ATTR_RE = re.compile(
     r'(<(?P<tag>[a-zA-Z][\w:-]*)\b[^>]*?\b(?P<attr>src|href|poster|data)\s*=\s*)'
@@ -95,6 +96,134 @@ EPUB_RESPONSIVE_STYLE_BLOCK = (
 )
 
 
+def _detect_source_format(file_path: Path) -> Optional[str]:
+    ext = file_path.suffix.lower()
+    if ext in {".md", ".markdown"}:
+        return "markdown"
+    if ext in {".html", ".htm"}:
+        return "html"
+    if ext == ".epub":
+        return "epub"
+    return None
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _sanitize_stem_for_resume_lookup(stem: str) -> str:
+    cleaned = BAD_FILENAME_CHARS_RE.sub("_", stem.strip())
+    cleaned = unicodedata.normalize("NFC", cleaned)
+    cleaned = re.sub(r"[【】\[\]\(\)（）「」『』]", "", cleaned)
+    cleaned = re.sub(r"[^\w.-]+", "_", cleaned, flags=re.UNICODE)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._ ")
+    return cleaned or "translated_novel"
+
+
+def _load_inprogress_resume_options(input_path: Path) -> Tuple[Optional[Path], Optional[dict]]:
+    if not input_path.is_file():
+        return None, None
+
+    candidates = sorted(
+        input_path.parent.glob("*.resume.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None, None
+
+    source_resolved = input_path.resolve()
+    inprogress_candidates: List[Tuple[Path, dict, Optional[dict]]] = []
+    for resume_file in candidates:
+        try:
+            data = json.loads(resume_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        total = _safe_int(data.get("total"), 0)
+        current = _safe_int(data.get("i"), 0)
+        if total <= 0 or current >= total:
+            continue
+
+        resume_options = data.get("resume_options")
+        if isinstance(resume_options, dict):
+            source_file = resume_options.get("source_file")
+            if source_file:
+                try:
+                    if Path(str(source_file)).resolve() == source_resolved:
+                        return resume_file, resume_options
+                except Exception:
+                    pass
+        inprogress_candidates.append((resume_file, data, resume_options if isinstance(resume_options, dict) else None))
+
+    source_format = _detect_source_format(input_path)
+    if source_format is None:
+        return None, None
+
+    expected_suffix = ".html" if source_format == "epub" else input_path.suffix
+    expected_stems = {
+        input_path.stem,
+        _sanitize_stem_for_resume_lookup(input_path.stem),
+    }
+
+    for resume_file, _, resume_options in inprogress_candidates:
+        output_name = resume_file.name[:-12] if resume_file.name.endswith(".resume.json") else resume_file.name
+        output_path = Path(output_name)
+        if output_path.suffix != expected_suffix:
+            continue
+        output_stem = output_path.stem
+        if any(output_stem.startswith(stem) for stem in expected_stems):
+            return resume_file, resume_options
+    return None, None
+
+
+def _restore_args_from_resume_options(args, options: dict) -> None:
+    suffix = options.get("suffix")
+    if isinstance(suffix, str) and suffix.strip():
+        args.suffix = suffix.strip()
+
+    output_style = options.get("output_style")
+    if output_style in {"bilingual", "translated"}:
+        args.output_style = output_style
+
+    html_style = options.get("html_translation_style")
+    if html_style in {"blockquote", "paragraph", "details"}:
+        args.html_translation_style = html_style
+
+    post_package = options.get("post_package")
+    if post_package in {"none", "htmlz", "epub", "epubv3", "both"}:
+        args.post_package = post_package
+
+    args.skip_existing = _as_bool(options.get("skip_existing"), args.skip_existing)
+    args.no_resume = not _as_bool(options.get("resume_enabled"), not args.no_resume)
+    args.no_realtime_write = not _as_bool(options.get("realtime_write"), not args.no_realtime_write)
+
+    for field in ("htmlz_title", "htmlz_author", "htmlz_language", "htmlz_identifier", "htmlz_publisher"):
+        value = options.get(field)
+        if isinstance(value, str):
+            setattr(args, field, value)
+        elif value is None:
+            setattr(args, field, None if field != "htmlz_language" else args.htmlz_language)
+
+
 @dataclass
 class Token:
     content: str
@@ -126,6 +255,8 @@ class MarkdownNovelTranslator:
         self.reasoning = self._resolve_reasoning(reasoning_effort)
         self.reasoning_supported = True
         self.last_failure_reason = ""
+        self.last_similarity_suspicious: List[dict] = []
+        self.last_similarity_failure_attempts: List[dict] = []
         self.client = OpenAI(
             api_key=self.config["api_key"],
             base_url=self.config["base_url"],
@@ -194,6 +325,16 @@ class MarkdownNovelTranslator:
             return data
         except Exception:
             return None
+
+    def _similarity_debug_log_path(self, output_file: Path) -> Path:
+        return output_file.with_name(f"{output_file.name}.similarity_debug.log")
+
+    def _append_similarity_debug_log(self, log_path: Path, payload: dict) -> None:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as fp:
+            fp.write(f"\n=== {timestamp} ===\n")
+            json.dump(payload, fp, ensure_ascii=False, indent=2)
+            fp.write("\n")
 
     def _sanitize_archive_filename_stem(self, stem: str) -> str:
         cleaned = BAD_FILENAME_CHARS_RE.sub("_", stem.strip())
@@ -1550,8 +1691,9 @@ class MarkdownNovelTranslator:
             return False
         if not NAME_LIKE_TEXT_RE.fullmatch(raw):
             return False
+        has_handle_suffix = bool(HANDLE_SUFFIX_RE.search(raw))
         hiragana_count = len(HIRAGANA_CHAR_RE.findall(raw))
-        if hiragana_count > 1:
+        if hiragana_count > 1 and not has_handle_suffix:
             return False
         compact = self._normalize_similarity_text(raw, strip_punctuation=True)
         if not compact:
@@ -1661,6 +1803,7 @@ class MarkdownNovelTranslator:
     ):
         target_language = self.config.get("target_language", "Simplified Chinese")
         self.last_failure_reason = ""
+        self.last_similarity_suspicious = []
         # Keep compatibility with both markdown-novel prompts (segments) and
         # legacy mokuro prompts (pages + previous_context).
         input_pages = [[seg] for seg in segment_texts]
@@ -1739,6 +1882,15 @@ class MarkdownNovelTranslator:
                 translated_segments=translated,
             )
             if suspicious:
+                self.last_similarity_suspicious = [
+                    {
+                        "local_index": int(idx),
+                        "ratio": float(ratio),
+                        "source_text": str(segment_texts[idx - 1]),
+                        "translated_text": str(translated[idx - 1]),
+                    }
+                    for idx, ratio in suspicious
+                ]
                 self.last_failure_reason = "untranslated_similarity"
                 exact_only = bool(self.config.get("translation_similarity_exact_only", True))
                 threshold = float(self.config.get("translation_similarity_threshold", 0.96))
@@ -1782,6 +1934,7 @@ class MarkdownNovelTranslator:
         need_summary_update: bool,
         retries: int = 2,
     ):
+        self.last_similarity_failure_attempts = []
         for attempt in range(1, retries + 1):
             if attempt > 1:
                 self._print(
@@ -1816,6 +1969,14 @@ class MarkdownNovelTranslator:
                 ),
                 "yellow",
             )
+            if self.last_failure_reason == "untranslated_similarity" and self.last_similarity_suspicious:
+                self.last_similarity_failure_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "retries": retries,
+                        "suspected_segments": [dict(item) for item in self.last_similarity_suspicious],
+                    }
+                )
             if attempt < retries:
                 time.sleep(1.2 * attempt)
         return None, ""
@@ -2034,6 +2195,7 @@ class MarkdownNovelTranslator:
         htmlz_publisher: Optional[str] = None,
         resume: bool = True,
         realtime_write: bool = True,
+        session_options: Optional[dict] = None,
     ):
         prep_started_at = time.time()
         epub_meta: Dict[str, Optional[str]] = {}
@@ -2133,11 +2295,29 @@ class MarkdownNovelTranslator:
         chars_since_summary = 0
         output_bytes_written = 0
         resumed = False
+        similarity_abort_consecutive = max(
+            2,
+            int(self.config.get("translation_similarity_abort_consecutive", 3)),
+        )
+        similarity_streak_by_segment: Dict[int, int] = {}
+        similarity_debug_history: List[dict] = []
 
         token_part_total = Counter(seg.token_index for seg in prepared_segments)
         token_part_translated: Dict[int, List[str]] = {}
         completed_token_map: Dict[int, str] = {}
         next_token_to_write = 0
+        resume_options = dict(session_options or {})
+        resume_options.update(
+            {
+                "source_file": str(input_file.resolve()),
+                "output_file": str(output_file.resolve()),
+                "source_format": source_format,
+                "output_style": output_style,
+                "html_translation_style": html_translation_style,
+                "resume_enabled": bool(resume),
+                "realtime_write": bool(realtime_write),
+            }
+        )
 
         if resume:
             previous_state = self._load_resume_state(resume_path)
@@ -2269,6 +2449,7 @@ class MarkdownNovelTranslator:
                 "completed_token_map": {str(k): v for k, v in completed_token_map.items()},
                 "next_token_to_write": next_token_to_write,
                 "output_bytes_written": output_bytes_written,
+                "resume_options": resume_options,
             }
             self._save_resume_state(resume_path, state)
 
@@ -2364,6 +2545,103 @@ class MarkdownNovelTranslator:
                 persist_resume_state()
                 continue
 
+            failure_reason = self.last_failure_reason or "unknown"
+            if failure_reason == "untranslated_similarity":
+                attempt_events = self.last_similarity_failure_attempts or [
+                    {
+                        "attempt": 1,
+                        "retries": 1,
+                        "suspected_segments": [dict(item) for item in self.last_similarity_suspicious],
+                    }
+                ]
+                stop_segment_index: Optional[int] = None
+                for attempt_event in attempt_events:
+                    flagged_now: Dict[int, dict] = {}
+                    raw_segments = attempt_event.get("suspected_segments")
+                    if isinstance(raw_segments, list):
+                        for item in raw_segments:
+                            if not isinstance(item, dict):
+                                continue
+                            local_index = _safe_int(item.get("local_index"), 0)
+                            if local_index <= 0:
+                                continue
+                            global_index = i + local_index - 1
+                            if 0 <= global_index < total:
+                                flagged_now[global_index] = item
+
+                    for segment_index in list(similarity_streak_by_segment.keys()):
+                        if segment_index not in flagged_now:
+                            similarity_streak_by_segment[segment_index] = 0
+
+                    event_segments = []
+                    for segment_index, item in sorted(flagged_now.items()):
+                        streak = similarity_streak_by_segment.get(segment_index, 0) + 1
+                        similarity_streak_by_segment[segment_index] = streak
+                        event_segments.append(
+                            {
+                                "segment_index": segment_index + 1,
+                                "local_index": _safe_int(item.get("local_index"), 0),
+                                "ratio": float(item.get("ratio", 0.0)),
+                                "streak": streak,
+                                "source_text": str(item.get("source_text", "")),
+                                "translated_text": str(item.get("translated_text", "")),
+                            }
+                        )
+                        if streak >= similarity_abort_consecutive and stop_segment_index is None:
+                            stop_segment_index = segment_index
+
+                    similarity_debug_history.append(
+                        {
+                            "attempt_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "chunk_start_segment": i + 1,
+                            "chunk_end_segment": end,
+                            "chunk_size": end - i,
+                            "api_attempt": _safe_int(attempt_event.get("attempt"), 0),
+                            "api_retry_total": _safe_int(attempt_event.get("retries"), 0),
+                            "chunk_policy": {
+                                "min_chunk_segments": current_min_chunk_segments,
+                                "max_chunk_segments": current_max_chunk_segments,
+                                "target_chunk_chars": current_target_chunk_chars,
+                                "max_chunk_chars": current_char_limit,
+                            },
+                            "suspected_segments": event_segments,
+                        }
+                    )
+                    if len(similarity_debug_history) > 60:
+                        similarity_debug_history = similarity_debug_history[-60:]
+                    if stop_segment_index is not None:
+                        break
+
+                if stop_segment_index is not None:
+                    log_path = self._similarity_debug_log_path(output_file)
+                    log_payload = {
+                        "event": "similarity_false_positive_guard_stop",
+                        "threshold": similarity_abort_consecutive,
+                        "triggered_segment": stop_segment_index + 1,
+                        "input_file": str(input_file),
+                        "output_file": str(output_file),
+                        "resume_file": str(resume_path),
+                        "history": similarity_debug_history,
+                    }
+                    try:
+                        self._append_similarity_debug_log(log_path, log_payload)
+                    except Exception as e:
+                        self._print("DebugLog Warn", f"{input_file.name}: {e}", "yellow")
+                    persist_resume_state()
+                    self._print(
+                        "Abort",
+                        (
+                            f"{input_file.name}: segment {stop_segment_index + 1} hit "
+                            f"untranslated_similarity {similarity_abort_consecutive} times; "
+                            f"stopped to avoid repeated retries. debug={log_path.name}"
+                        ),
+                        "red",
+                    )
+                    return False
+            elif similarity_streak_by_segment:
+                for segment_index in list(similarity_streak_by_segment.keys()):
+                    similarity_streak_by_segment[segment_index] = 0
+
             if current_min_chunk_segments == 1 and end == i + 1:
                 self._print(
                     "Abort",
@@ -2372,7 +2650,6 @@ class MarkdownNovelTranslator:
                 )
                 return False
 
-            failure_reason = self.last_failure_reason or "unknown"
             shrink_ratio = 0.8 if failure_reason == "parse_fail" else 0.5
             new_min_chunk_segments = shrink_value(
                 current=current_min_chunk_segments,
@@ -2500,25 +2777,15 @@ class MarkdownNovelTranslator:
         resume: bool = True,
         realtime_write: bool = True,
     ):
-        def detect_source_format(file_path: Path) -> Optional[str]:
-            ext = file_path.suffix.lower()
-            if ext in {".md", ".markdown"}:
-                return "markdown"
-            if ext in {".html", ".htm"}:
-                return "html"
-            if ext == ".epub":
-                return "epub"
-            return None
-
         path = Path(input_path)
         if path.is_file():
-            if detect_source_format(path) is None:
+            if _detect_source_format(path) is None:
                 raise ValueError(f"Unsupported file type: {path.suffix}")
             files = [path]
         elif path.is_dir():
             files = sorted(
                 p for p in path.rglob("*")
-                if p.is_file() and detect_source_format(p) is not None
+                if p.is_file() and _detect_source_format(p) is not None
             )
         else:
             raise FileNotFoundError(f"Path not found: {input_path}")
@@ -2528,7 +2795,7 @@ class MarkdownNovelTranslator:
             return
 
         for input_file in files:
-            source_format = detect_source_format(input_file)
+            source_format = _detect_source_format(input_file)
             if source_format is None:
                 continue
             if input_file.stem.endswith(suffix):
@@ -2555,6 +2822,20 @@ class MarkdownNovelTranslator:
                     htmlz_publisher=htmlz_publisher,
                     resume=resume,
                     realtime_write=realtime_write,
+                    session_options={
+                        "suffix": suffix,
+                        "skip_existing": bool(skip_existing),
+                        "post_package": post_package,
+                        "output_style": output_style,
+                        "html_translation_style": html_translation_style,
+                        "htmlz_title": htmlz_title,
+                        "htmlz_author": htmlz_author,
+                        "htmlz_language": htmlz_language,
+                        "htmlz_identifier": htmlz_identifier,
+                        "htmlz_publisher": htmlz_publisher,
+                        "resume_enabled": bool(resume),
+                        "realtime_write": bool(realtime_write),
+                    },
                 )
                 if not success:
                     continue
@@ -2703,6 +2984,29 @@ def _select_mode_with_default(prompt: str, choices: Dict[str, str], default: str
 
 def _interactive_setup(args):
     print("\n=== Interactive Mode ===")
+    args.skip_api_check = False
+    args.api_check_only = False
+    args.input_path = ""
+    while not args.input_path:
+        raw_path = input("Input file/folder path: ")
+        normalized_path = _normalize_user_path_input(raw_path)
+        if not normalized_path:
+            continue
+        if not Path(normalized_path).exists():
+            print(f"[Path not found] {normalized_path}")
+            continue
+        args.input_path = normalized_path
+
+    resume_path, resume_options = _load_inprogress_resume_options(Path(args.input_path))
+    if resume_path and resume_options:
+        _restore_args_from_resume_options(args, resume_options)
+        print(f"[Resume] In-progress checkpoint found: {resume_path.name}")
+        print("[Resume] Restored first-run options from checkpoint and skipped option prompts.")
+        return args
+    if resume_path:
+        print(f"[Resume] In-progress checkpoint found: {resume_path.name}")
+        print("[Resume] Missing option snapshot in checkpoint; please choose options manually.")
+
     print("1) Translate only (no post-package)")
     print("2) Translate + package htmlz")
     print("3) Translate + package epub (compatible)")
@@ -2718,8 +3022,6 @@ def _interactive_setup(args):
     }
     mode_choice = _select_mode_with_default("Select work mode", mode_map, "1")
     mode_value = mode_map[mode_choice]
-
-    args.skip_api_check = False
     if mode_value == "api_check_only":
         args.api_check_only = True
         args.input_path = None
@@ -2727,16 +3029,6 @@ def _interactive_setup(args):
 
     args.api_check_only = False
     args.post_package = mode_value
-    args.input_path = ""
-    while not args.input_path:
-        raw_path = input("Input file/folder path: ")
-        normalized_path = _normalize_user_path_input(raw_path)
-        if not normalized_path:
-            continue
-        if not Path(normalized_path).exists():
-            print(f"[Path not found] {normalized_path}")
-            continue
-        args.input_path = normalized_path
     args.suffix = _input_with_default("Output suffix", args.suffix)
 
     style_map = {"1": "bilingual", "2": "translated"}
