@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
-config.json
+config*.json
+!config.example.json
 prompt.txt
 .DS_Store
 convert_datauri_epub.py
