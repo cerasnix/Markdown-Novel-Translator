@@ -63,6 +63,11 @@ NAME_LIKE_TEXT_RE = re.compile(
 )
 HANDLE_SUFFIX_RE = re.compile(r"[@＠][A-Za-z0-9][A-Za-z0-9_.-]*\s*$")
 SENTENCE_PUNCT_RE = re.compile(r"[。！？!?；;：:、，,]")
+REASONING_UNSUPPORTED_HINT_RE = re.compile(
+    r"(unknown parameter|unrecognized request argument|unsupported (?:parameter|argument)|"
+    r"extra inputs are not permitted|unexpected (?:field|parameter|argument)|not allowed)",
+    re.IGNORECASE,
+)
 HTML_ASSET_URL_ATTR_RE = re.compile(
     r'(<(?P<tag>[a-zA-Z][\w:-]*)\b[^>]*?\b(?P<attr>src|href|poster|data)\s*=\s*)'
     r'(?P<quote>["\'])(?P<url>[^"\']+)(?P=quote)',
@@ -1158,6 +1163,13 @@ class MarkdownNovelTranslator:
             return "low"
         return value
 
+    def _is_reasoning_unsupported_error(self, error_message: str) -> bool:
+        normalized = " ".join(str(error_message or "").split())
+        lowered = normalized.lower()
+        if "reasoning" not in lowered:
+            return False
+        return bool(REASONING_UNSUPPORTED_HINT_RE.search(normalized))
+
     def _mask_secret(self, value: str) -> str:
         if not value:
             return "(empty)"
@@ -1276,11 +1288,11 @@ class MarkdownNovelTranslator:
                 return True
             except Exception as e:
                 message = str(e)
-                if self.reasoning_supported and "Unknown parameter: 'reasoning'" in message:
+                if self.reasoning_supported and self._is_reasoning_unsupported_error(message):
                     self.reasoning_supported = False
                     self._print(
                         "API Check Compat",
-                        "reasoning parameter unsupported; retrying check without reasoning",
+                        "reasoning parameter unsupported; retrying check without reasoning.",
                         "yellow",
                     )
                     continue
@@ -1909,7 +1921,7 @@ class MarkdownNovelTranslator:
             return translated, new_summary
         except Exception as e:
             message = str(e)
-            if self.reasoning_supported and "Unknown parameter: 'reasoning'" in message:
+            if self.reasoning_supported and self._is_reasoning_unsupported_error(message):
                 self.reasoning_supported = False
                 self._print(
                     "Compat",
